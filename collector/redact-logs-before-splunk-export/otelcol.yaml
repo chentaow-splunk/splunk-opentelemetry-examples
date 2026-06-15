@@ -1,0 +1,64 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+  transform/log_string_redaction:
+    error_mode: ignore
+    log_statements:
+      - 'replace_pattern(log.body, "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)", "$$1=***") where IsString(log.body)'
+      - 'replace_pattern(log.body, "\\b4[0-9]{12}(?:[0-9]{3})?\\b", "****") where IsString(log.body)'
+      - 'replace_pattern(log.body, "\\b5[1-5][0-9]{14}\\b", "****") where IsString(log.body)'
+  redaction/log_maps_and_attributes:
+    allow_all_keys: true
+    redact_all_types: true
+    blocked_key_patterns:
+      - "(?i).*password.*"
+      - "(?i).*passwd.*"
+      - "(?i).*secret.*"
+      - "(?i).*token.*"
+      - "(?i).*api[_-]?key.*"
+      - "(?i).*authorization.*"
+      - "(?i).*cookie.*"
+    blocked_values:
+      - "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)"
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+      - "\\b5[1-5][0-9]{14}\\b"
+    summary: info
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: redacted-logs
+  batch: {}
+
+exporters:
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/log_string_redaction, redaction/log_maps_and_attributes, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]

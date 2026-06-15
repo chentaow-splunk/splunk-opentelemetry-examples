@@ -1,0 +1,69 @@
+receivers:
+  prometheus/static_targets:
+    config:
+      scrape_configs:
+        - job_name: app-metrics
+          scrape_interval: 30s
+          scrape_timeout: 10s
+          metrics_path: /metrics
+          static_configs:
+            - targets:
+                - app-1.example.internal:8080
+                - app-2.example.internal:8080
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "(http_server_request_duration_seconds.*|http_server_requests_total|process_cpu_seconds_total|process_resident_memory_bytes)"
+              action: keep
+        - job_name: https-appliance
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 15s
+          metrics_path: /metrics
+          authorization:
+            type: Bearer
+            credentials_file: /etc/collector/secrets/prometheus_bearer_token
+          tls_config:
+            ca_file: /etc/collector/certs/appliance-ca.pem
+            server_name: appliance.example.internal
+            insecure_skip_verify: false
+          static_configs:
+            - targets:
+                - appliance.example.internal:443
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "(appliance_requests_total|appliance_errors_total|appliance_latency_seconds.*)"
+              action: keep
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: prometheus-scrapes
+  batch: {}
+
+exporters:
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [prometheus/static_targets]
+      processors: [memory_limiter, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]

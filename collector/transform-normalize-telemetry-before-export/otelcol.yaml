@@ -1,0 +1,80 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+  transform/normalize:
+    error_mode: ignore
+    trace_statements:
+      - 'set(resource.attributes["deployment.environment"], "unknown") where resource.attributes["deployment.environment"] == nil'
+      - 'set(resource.attributes["service.namespace"], "customer-facing") where resource.attributes["service.namespace"] == nil'
+      - 'delete_key(span.attributes, "http.request.header.authorization")'
+      - 'delete_key(span.attributes, "http.request.header.cookie")'
+      - 'replace_pattern(span.attributes["db.statement"], "(?i)(password|token|api_key)\\s*=\\s*''[^'']*''", "$$1=''***''") where span.attributes["db.statement"] != nil'
+      - 'truncate_all(span.attributes, 2048)'
+      - 'limit(span.attributes, 128, ["http.method", "http.route", "http.status_code"])'
+    metric_statements:
+      - 'replace_pattern(metric.name, "^kube_([0-9A-Za-z]+_)", "k8s.$$1.")'
+      - 'delete_key(datapoint.attributes, "pod_uid")'
+      - 'delete_key(datapoint.attributes, "container_id")'
+      - 'limit(datapoint.attributes, 64, ["service.name", "k8s.namespace.name", "k8s.pod.name"])'
+    log_statements:
+      - 'delete_key(log.attributes, "http.request.header.authorization")'
+      - 'delete_key(log.attributes, "http.request.header.cookie")'
+      - 'replace_pattern(log.body, "(?i)(password|token|api[_-]?key)=([^\\s]+)", "$$1=***") where IsString(log.body)'
+      - 'truncate_all(log.attributes, 2048)'
+      - 'limit(log.attributes, 128, ["service.name", "deployment.environment", "severity"])'
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: normalized-telemetry
+  batch: {}
+
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/normalize, resourcedetection, resource/splunk_context, batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/normalize, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/normalize, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]

@@ -1,0 +1,84 @@
+clusterName: "<cluster_name>"
+environment: "<environment_name>"
+
+secret:
+  create: false
+  name: splunk-secret
+
+agent:
+  discovery:
+    enabled: true
+  config:
+    receivers:
+      receiver_creator/prometheus_pods:
+        watch_observers: [k8s_observer]
+        receivers:
+          prometheus:
+            rule: type == "pod" && labels["observability.splunk.com/scrape"] == "true"
+            config:
+              config:
+                scrape_configs:
+                  - job_name: kubernetes-pod-metrics
+                    scrape_interval: 30s
+                    scrape_timeout: 10s
+                    metrics_path: /metrics
+                    static_configs:
+                      - targets:
+                          - '`endpoint`'
+                    metric_relabel_configs:
+                      - source_labels: [__name__]
+                        regex: "(http_server_request_duration_seconds.*|http_server_requests_total|process_cpu_seconds_total|process_resident_memory_bytes)"
+                        action: keep
+    service:
+      pipelines:
+        metrics/prometheus-pods:
+          receivers:
+            - receiver_creator/prometheus_pods
+          processors:
+            - memory_limiter
+            - resourcedetection
+            - resource
+            - batch
+          exporters:
+            - signalfx
+
+clusterReceiver:
+  config:
+    receivers:
+      prometheus/kubernetes_services:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-service-metrics
+              scrape_interval: 30s
+              scrape_timeout: 10s
+              kubernetes_sd_configs:
+                - role: service
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+                  regex: "true"
+                  action: keep
+                - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+                  regex: "(.+)"
+                  target_label: __metrics_path__
+                - source_labels:
+                    - __address__
+                    - __meta_kubernetes_service_annotation_prometheus_io_port
+                  regex: "([^:]+)(?::\\d+)?;(\\d+)"
+                  replacement: "$$1:$$2"
+                  target_label: __address__
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  regex: "(http_server_request_duration_seconds.*|http_server_requests_total|grpc_server_handled_total)"
+                  action: keep
+    service:
+      pipelines:
+        metrics/prometheus-services:
+          receivers:
+            - prometheus/kubernetes_services
+          processors:
+            - memory_limiter
+            - resourcedetection
+            - resource
+            - batch
+          exporters:
+            - signalfx

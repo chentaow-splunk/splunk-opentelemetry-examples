@@ -1,0 +1,70 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+  filter/noise:
+    error_mode: ignore
+    trace_conditions:
+      - 'IsMatch(span.name, ".*/(health|ready|live|metrics).*")'
+    metric_conditions:
+      - 'IsMatch(metric.name, "^(go_|process_|promhttp_).*")'
+      - 'datapoint.attributes["http.route"] == "/health"'
+      - 'datapoint.attributes["http.target"] == "/metrics"'
+    log_conditions:
+      - 'log.severity_number < SEVERITY_NUMBER_WARN'
+      - 'IsMatch(log.body, "(?i).*health(check)?.*")'
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: filtered-telemetry
+  batch: {}
+
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]
