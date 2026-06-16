@@ -130,6 +130,21 @@ Observed after:
 debug exporter output retained GET /error and GET /slow; dropped GET /ordinary with baseline sampling set to 0 for deterministic validation.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: tail-sampling-error-and-latency-traces-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAAENUgQQ", "value": 6.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 The `status_code` policy keeps error traces. The `latency` policy keeps slow traces. The probabilistic policy keeps a baseline sample of ordinary traces so service maps and latency trends still have data.

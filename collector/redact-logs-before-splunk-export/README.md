@@ -131,6 +131,21 @@ Observed after:
 debug exporter output contained login **** card=****, retained safe.field=keep-me, and included redaction.masked.count.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: redact-logs-before-splunk-export-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAABhWBm4", "value": 8.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 Plain string log bodies and structured log records need different handling. `replace_pattern(log.body, ...)` is explicit for string bodies. The redaction processor is then used for attributes and structured maps where it has documented support.

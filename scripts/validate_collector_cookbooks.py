@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shutil
@@ -22,6 +23,7 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlencode
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -43,12 +45,23 @@ class ValidationResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class BackendQueryResult:
+    found: bool
+    http_status: int
+    metric: str
+    dimensions: dict[str, str]
+    evidence: list[str] = field(default_factory=list)
+    values: list[object] = field(default_factory=list)
+
+
 def run(
     cmd: list[str],
     *,
     check: bool = True,
     capture: bool = True,
     timeout: int = 30,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
@@ -56,6 +69,7 @@ def run(
         capture_output=capture,
         text=True,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -78,6 +92,35 @@ def post_json(url: str, payload: dict) -> str:
         raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"Could not POST to {url}: {exc}") from exc
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def backend_env(env_file: Path, realm: str) -> dict[str, str]:
+    load_env_file(env_file)
+    missing = [name for name in ("SPLUNK_ACCESS_TOKEN", "SPLUNK_API_TOKEN") if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"missing required backend environment values: {', '.join(missing)}")
+    return {
+        "SPLUNK_ACCESS_TOKEN": os.environ["SPLUNK_ACCESS_TOKEN"],
+        "SPLUNK_API_TOKEN": os.environ["SPLUNK_API_TOKEN"],
+        "SPLUNK_REALM": realm,
+        "SPLUNK_API_URL": f"https://api.{realm}.observability.splunkcloud.com",
+        "SPLUNK_INGEST_URL": f"https://ingest.{realm}.observability.splunkcloud.com",
+        "SPLUNK_STREAM_URL": f"https://stream.{realm}.observability.splunkcloud.com",
+    }
 
 
 def log_record(body: str, *, severity_number: int = 9, severity_text: str = "INFO", attrs: dict[str, object] | None = None) -> dict:
@@ -104,13 +147,19 @@ def span(name: str, *, trace_id: str, span_id: str, status_code: int = 1, durati
     }
 
 
-def gauge_metric(name: str, val: float, *, attrs: dict[str, object] | None = None) -> dict:
+def gauge_metric(
+    name: str,
+    val: float,
+    *,
+    attrs: dict[str, object] | None = None,
+    time_unix_nano: int = NANO,
+) -> dict:
     return {
         "name": name,
         "gauge": {
             "dataPoints": [
                 {
-                    "timeUnixNano": str(NANO),
+                    "timeUnixNano": str(time_unix_nano),
                     "asDouble": val,
                     "attributes": attrs_list(attrs or {}),
                 }
@@ -226,12 +275,20 @@ class MetricsServer:
 
 
 class CollectorRun:
-    def __init__(self, slug: str, config: str, workdir: Path, ports: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        slug: str,
+        config: str,
+        workdir: Path,
+        ports: dict[int, int] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self.slug = slug
         self.name = f"cookbook-validation-{slug[:32]}-{int(time.time() * 1000)}"
         self.config = config
         self.workdir = workdir
         self.ports = ports or {}
+        self.env = env or {}
         self.config_path = workdir / f"{self.name}.yaml"
 
     def __enter__(self) -> "CollectorRun":
@@ -241,9 +298,13 @@ class CollectorRun:
             cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
         for host_port, container_port in self.ports.items():
             cmd.extend(["-p", f"127.0.0.1:{host_port}:{container_port}"])
+        container_env = os.environ.copy()
+        container_env.update(self.env)
+        for key in self.env:
+            cmd.extend(["-e", key])
         cmd.extend([IMAGE, f"--config=/tmp/{self.name}.yaml"])
         try:
-            run(cmd)
+            run(cmd, env=container_env)
             run(["docker", "cp", str(self.config_path), f"{self.name}:/tmp/{self.name}.yaml"])
             run(["docker", "start", self.name])
             self.wait_ready()
@@ -305,6 +366,19 @@ def debug_exporter() -> str:
     ).strip()
 
 
+def signalfx_exporter(realm: str) -> str:
+    return textwrap.dedent(
+        f"""
+        exporters:
+          signalfx:
+            access_token: "${{env:SPLUNK_ACCESS_TOKEN}}"
+            api_url: "https://api.{realm}.observability.splunkcloud.com"
+            ingest_url: "https://ingest.{realm}.observability.splunkcloud.com"
+            sync_host_metadata: false
+        """
+    ).strip()
+
+
 def otlp_receiver() -> str:
     return textwrap.dedent(
         """
@@ -354,12 +428,111 @@ def service_multi(pipelines: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
+def service_metrics_export(processors: list[str], exporter: str = "debug", receiver: str = "otlp") -> str:
+    return textwrap.dedent(
+        f"""
+        service:
+          telemetry:
+            logs:
+              level: info
+          pipelines:
+            metrics:
+              receivers: [{receiver}]
+              processors: [{', '.join(processors)}]
+              exporters: [{exporter}]
+        """
+    ).strip()
+
+
 def join_config(*sections: str) -> str:
     return "\n\n".join(section.strip() for section in sections if section.strip()) + "\n"
 
 
 def assert_contains(text: str, expected: list[str]) -> list[str]:
     return [item for item in expected if item not in text]
+
+
+def signalflow_query(
+    metric: str,
+    dimensions: dict[str, str],
+    env: dict[str, str],
+    *,
+    start_unix: int,
+    stop_unix: int,
+    timeout: int = 45,
+) -> BackendQueryResult:
+    filters = " and ".join(f'filter("{key}", "{value}")' for key, value in dimensions.items())
+    if filters:
+        program = f'data("{metric}", filter={filters}).publish(label="A")'
+    else:
+        program = f'data("{metric}").publish(label="A")'
+    body = json.dumps({"programText": program}).encode("utf-8")
+    query = urlencode({"start": f"{start_unix * 1000}", "stop": f"{stop_unix * 1000}", "resolution": "10000"})
+    url = f"{env['SPLUNK_STREAM_URL']}/v2/signalflow/execute?{query}"
+    req = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "X-SF-TOKEN": env["SPLUNK_API_TOKEN"]},
+        method="POST",
+    )
+    evidence: list[str] = []
+    values: list[object] = []
+    status = 0
+    current_event = ""
+    data_lines: list[str] = []
+
+    def flush_event() -> None:
+        nonlocal current_event, data_lines, values
+        if not current_event and not data_lines:
+            return
+        payload = "\n".join(data_lines).strip()
+        if current_event in {"control-message", "message", "data"} and payload:
+            compact = " ".join(payload.split())
+            evidence.append(f"{current_event}: {compact[:500]}")
+        if current_event == "data" and payload:
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                parsed = {}
+            batch = parsed.get("data") if isinstance(parsed, dict) else None
+            if batch:
+                values.extend(batch)
+        current_event = ""
+        data_lines = []
+
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            status = response.status
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                raw = response.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if line.startswith("event:"):
+                    flush_event()
+                    current_event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].strip())
+                elif not line.strip():
+                    flush_event()
+                if values:
+                    break
+            flush_event()
+    except HTTPError as exc:
+        status = exc.code
+        body = exc.read().decode("utf-8", errors="replace")
+        evidence.append(f"HTTP {exc.code}: {' '.join(body.split())[:500]}")
+    except (TimeoutError, socket.timeout):
+        evidence.append("SignalFlow read timed out after receiving partial stream")
+        flush_event()
+    except URLError as exc:
+        evidence.append(f"SignalFlow request failed: {exc}")
+
+    found = bool(values)
+    if not found and not any("FIND_MATCHED_NO_TIMESERIES" in item for item in evidence):
+        evidence.append("No non-empty data events were returned")
+    return BackendQueryResult(found, status, metric, dimensions, evidence[-8:], values[:5])
 
 
 def validate_prometheus_static(workdir: Path) -> ValidationResult:
@@ -420,6 +593,163 @@ promhttp_metric_handler_requests_total{code="200"} 3
         },
         missing + (["promhttp_metric_handler_requests_total unexpectedly exported"] if unexpected else []),
     )
+
+
+def validate_backend_probe(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "backend-signalfx-exporter-probe"
+    run_id = str(int(time.time()))
+    metric = "test_requests_total"
+    start_unix = int(time.time())
+    current_nano = start_unix * 1_000_000_000
+    config = join_config(
+        otlp_receiver(),
+        base_processors(""),
+        signalfx_exporter(env["SPLUNK_REALM"]),
+        service_metrics_export(["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"], "signalfx"),
+    )
+    port = free_port()
+    collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
+    with CollectorRun(slug, config, workdir, {port: 4318}, collector_env) as collector:
+        post_json(
+            f"http://127.0.0.1:{port}/v1/metrics",
+            metrics_payload(
+                [
+                    gauge_metric(
+                        metric,
+                        42,
+                        attrs={
+                            "validation_run_id": run_id,
+                            "source": "codex-collector-backend-probe",
+                        },
+                        time_unix_nano=current_nano,
+                    )
+                ],
+                service="codex-collector-backend-probe",
+            ),
+        )
+        time.sleep(30)
+        logs = collector.logs()
+    exporter_errors = [
+        line
+        for line in logs.splitlines()
+        if "Exporting failed" in line or "Permanent error" in line or "Unauthorized" in line
+    ]
+    time.sleep(90)
+    query = signalflow_query(
+        metric,
+        {"validation_run_id": run_id},
+        env,
+        start_unix=start_unix - 120,
+        stop_unix=int(time.time()) + 180,
+    )
+    observed_after = [
+        f"Collector signalfx exporter sent metric {metric} with validation_run_id={run_id}.",
+        f"SignalFlow query HTTP status: {query.http_status}.",
+        f"SignalFlow found series: {query.found}.",
+    ]
+    if query.values:
+        observed_after.append(f"First SignalFlow data event: {json.dumps(query.values[0], sort_keys=True)[:500]}")
+    else:
+        observed_after.extend(query.evidence[-3:])
+    errors = exporter_errors + ([] if query.found else ["SignalFlow did not return a non-empty data event for the exported metric"])
+    return ValidationResult(
+        slug,
+        "Backend Signalfx Exporter Probe",
+        not errors,
+        "Exported a synthetic metric through the Collector signalfx exporter and queried it through Splunk Observability Cloud SignalFlow.",
+        {
+            "before": f"Synthetic OTLP metric {metric}=42 was posted to a local Collector with validation_run_id={run_id}.",
+            "after": "\n".join(observed_after),
+        },
+        errors,
+    )
+
+
+def attach_backend_markers(
+    workdir: Path,
+    env: dict[str, str],
+    local_results: list[ValidationResult],
+) -> list[ValidationResult]:
+    marker_metric = "test_requests_total"
+    started = int(time.time())
+    markers: dict[str, tuple[str, int]] = {}
+    config = join_config(
+        otlp_receiver(),
+        base_processors(""),
+        signalfx_exporter(env["SPLUNK_REALM"]),
+        service_metrics_export(["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"], "signalfx"),
+    )
+    port = free_port()
+    collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
+    with CollectorRun("backend-cookbook-markers", config, workdir, {port: 4318}, collector_env):
+        for idx, item in enumerate(local_results, start=1):
+            if not item.passed:
+                continue
+            run_id = f"{item.slug}-{started}"
+            markers[item.slug] = (run_id, idx)
+            post_json(
+                f"http://127.0.0.1:{port}/v1/metrics",
+                metrics_payload(
+                    [
+                        gauge_metric(
+                            marker_metric,
+                            idx,
+                            attrs={
+                                "validation_run_id": run_id,
+                                "cookbook_slug": item.slug,
+                                "validation_backend": "splunk-us0-signalflow",
+                            },
+                            time_unix_nano=(started + idx) * 1_000_000_000,
+                        )
+                    ],
+                    service="codex-cookbook-backend-validation",
+                ),
+            )
+        time.sleep(30)
+
+    time.sleep(90)
+    combined: list[ValidationResult] = []
+    for item in local_results:
+        marker = markers.get(item.slug)
+        if not marker:
+            combined.append(item)
+            continue
+        run_id, expected_value = marker
+        query = signalflow_query(
+            marker_metric,
+            {"validation_run_id": run_id},
+            env,
+            start_unix=started - 120,
+            stop_unix=int(time.time()) + 240,
+        )
+        backend_lines = [
+            f"Splunk realm: {env['SPLUNK_REALM']}",
+            f"SignalFlow metric: {marker_metric}",
+            f"validation_run_id: {run_id}",
+            f"SignalFlow HTTP status: {query.http_status}",
+            f"SignalFlow found series: {query.found}",
+        ]
+        if query.values:
+            backend_lines.append(f"SignalFlow data event: {json.dumps(query.values[0], sort_keys=True)[:500]}")
+        else:
+            backend_lines.extend(query.evidence[-3:])
+        errors = list(item.errors)
+        if not query.found:
+            errors.append(f"Splunk backend marker was not queryable for validation_run_id={run_id}")
+        combined.append(
+            ValidationResult(
+                item.slug,
+                item.title,
+                item.passed and query.found,
+                item.summary,
+                {
+                    **item.observed,
+                    "backend": "\n".join(backend_lines),
+                },
+                errors,
+            )
+        )
+    return combined
 
 
 def validate_prometheus_kubernetes(workdir: Path) -> ValidationResult:
@@ -895,7 +1225,7 @@ def write_markdown(results: list[ValidationResult], output: Path) -> None:
         "",
         f"Collector image: `{IMAGE}`",
         "",
-        "These results were produced by `scripts/validate_collector_cookbooks.py` using local Collector containers, synthetic telemetry, and debug exporter output. They do not prove connectivity to a live Splunk tenant.",
+        "These results were produced by `scripts/validate_collector_cookbooks.py` using local Collector containers, synthetic telemetry, and debug exporter output. When `Observed Splunk backend` is present, the run also emitted a backend marker through the Collector `signalfx` exporter and queried it with Splunk Observability Cloud SignalFlow.",
         "",
     ]
     for item in results:
@@ -918,6 +1248,15 @@ def write_markdown(results: list[ValidationResult], output: Path) -> None:
                 "",
             ]
         )
+        if item.observed.get("backend"):
+            lines.extend(
+                [
+                    "Observed Splunk backend:",
+                    "",
+                    f"```text\n{item.observed['backend']}\n```",
+                    "",
+                ]
+            )
         if item.errors:
             lines.extend(["Errors:", "", *[f"- {error}" for error in item.errors], ""])
     output.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -932,6 +1271,10 @@ def main() -> int:
     parser.add_argument("--keep-workdir", action="store_true")
     parser.add_argument("--keep-containers", action="store_true")
     parser.add_argument("--only", action="append", default=[], help="Run only validators with this function name.")
+    parser.add_argument("--backend-probe", action="store_true", help="Validate Collector signalfx export with Splunk backend API.")
+    parser.add_argument("--backend-cookbooks", action="store_true", help="Run local validations and add Splunk backend marker validation for each passing cookbook.")
+    parser.add_argument("--realm", default="us0")
+    parser.add_argument("--env-file", default=str(ROOT.parent / ".env"))
     args = parser.parse_args()
     KEEP_CONTAINERS = args.keep_containers
 
@@ -942,19 +1285,26 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="collector-cookbook-validation-", dir="/private/tmp") as tmp:
         workdir = Path(tmp)
         results: list[ValidationResult] = []
-        validators = [
-            validator
-            for validator in VALIDATORS
-            if not args.only or validator.__name__ in args.only or validator.__name__.replace("validate_", "") in args.only
-        ]
+        backend_marker_env: dict[str, str] | None = None
+        if args.backend_probe:
+            env = backend_env(Path(args.env_file), args.realm)
+            validators = [lambda workdir: validate_backend_probe(workdir, env)]
+        else:
+            if args.backend_cookbooks:
+                backend_marker_env = backend_env(Path(args.env_file), args.realm)
+            validators = [
+                validator
+                for validator in VALIDATORS
+                if not args.only or validator.__name__ in args.only or validator.__name__.replace("validate_", "") in args.only
+            ]
         for validator in validators:
-            print(f"START {validator.__name__}", flush=True)
+            print(f"START {getattr(validator, '__name__', 'validate_backend_probe')}", flush=True)
             try:
                 result = validator(workdir)
             except Exception as exc:  # noqa: BLE001 - report every validator failure.
                 result = ValidationResult(
-                    slug=validator.__name__.replace("validate_", ""),
-                    title=validator.__name__,
+                    slug=getattr(validator, "__name__", "validate_backend_probe").replace("validate_", ""),
+                    title=getattr(validator, "__name__", "validate_backend_probe"),
                     passed=False,
                     summary="Validation crashed before producing evidence.",
                     errors=[f"{type(exc).__name__}: {exc}"],
@@ -963,6 +1313,15 @@ def main() -> int:
             print(f"{'PASS' if result.passed else 'FAIL'} {result.slug}: {result.summary}")
             for error in result.errors:
                 print(f"  - {error}")
+
+        if backend_marker_env:
+            print("START backend marker validation", flush=True)
+            results = attach_backend_markers(workdir, backend_marker_env, results)
+            for result in results:
+                backend_status = "PASS" if result.passed else "FAIL"
+                print(f"{backend_status} backend {result.slug}")
+                for error in result.errors:
+                    print(f"  - {error}")
 
         write_report(results, ROOT / args.json_output)
         write_markdown(results, ROOT / args.markdown_output)

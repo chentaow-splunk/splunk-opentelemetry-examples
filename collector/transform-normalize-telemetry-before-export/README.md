@@ -140,6 +140,21 @@ Observed after:
 debug exporter output contained password='***' and login token=***; removed authorization/cookie attributes and raw secret values.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: transform-normalize-telemetry-before-export-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAAIWda7Y", "value": 4.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 The transform processor is useful when the telemetry should remain available but needs shape changes before export. `delete_key`, `replace_pattern`, `truncate_all`, and `limit` are documented OTTL editor functions and are scoped to signal-specific contexts.

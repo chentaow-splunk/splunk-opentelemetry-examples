@@ -133,6 +133,21 @@ Observed after:
 debug exporter output removed raw sensitive values, retained customer.id/message, and included redaction.masked.count audit evidence.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: redact-sensitive-data-before-export-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAAAL8_9s", "value": 7.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 The redaction processor is purpose-built for sensitive attribute handling. `blocked_key_patterns` catches known risky keys, while `blocked_values` catches sensitive-looking values that appear under otherwise allowed keys.

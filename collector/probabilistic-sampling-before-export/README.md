@@ -130,6 +130,21 @@ Observed after:
 debug exporter output retained 36 unique records, consistent with percentage sampling over a small local test.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: probabilistic-sampling-before-export-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAAA7cz3A", "value": 5.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 The trace sampler uses `mode: proportional` for predictable ratio-based trace reduction. The log sampler keeps `fail_closed: false` so logs without sampling randomness are not dropped unexpectedly during initial rollout.

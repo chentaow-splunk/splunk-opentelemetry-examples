@@ -136,6 +136,21 @@ Observed after:
 debug exporter output retained GET /checkout, checkout_requests_total, and checkout failed; dropped the noisy samples.
 ```
 
+### Splunk Backend Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+
+```text
+Splunk realm: us0
+SignalFlow metric: test_requests_total
+validation_run_id: filter-noisy-telemetry-before-export-1781588783
+SignalFlow HTTP status: 200
+SignalFlow found series: True
+SignalFlow data event: {"tsId": "AAAAAJX6g9Y", "value": 3.0}
+```
+
+This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+
 ## Why This Configuration
 
 `error_mode: ignore` keeps valid telemetry flowing if a condition cannot evaluate on a particular record. The filter processor is placed early, after `memory_limiter`, so dropped telemetry does not consume later processor and exporter capacity.
