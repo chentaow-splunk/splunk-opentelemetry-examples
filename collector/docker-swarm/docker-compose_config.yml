@@ -12,8 +12,8 @@ services:
       - SPLUNK_ACCESS_TOKEN=12345
       - SPLUNK_REALM=us1
       - SPLUNK_CONFIG=/etc/collector.yml
-      - SPLUNK_API_URL=https://api.us1.signalfx.com
-      - SPLUNK_INGEST_URL=https://ingest.us1.signalfx.com
+      - SPLUNK_API_URL=https://api.us1.observability.splunkcloud.com
+      - SPLUNK_INGEST_URL=https://ingest.us1.observability.splunkcloud.com
     ports:
       - 13133:13133
       - 14250:14250

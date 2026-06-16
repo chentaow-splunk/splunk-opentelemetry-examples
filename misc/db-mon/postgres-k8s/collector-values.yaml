@@ -27,7 +27,7 @@ agent:
         headers:
           X-SF-Token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN}
           X-splunk-instrumentation-library: dbmon
-        logs_endpoint: https://ingest.us1.signalfx.com/v3/event
+        logs_endpoint: https://ingest.us1.observability.splunkcloud.com/v3/event
         sending_queue:
           batch:
             max_size: 10485760 # 10 MiB

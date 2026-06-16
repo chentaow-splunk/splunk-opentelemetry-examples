@@ -114,7 +114,7 @@ done
 # URL-encode query via jq
 ENCODED_QUERY="$(printf '%s' "${QUERY}" | jq -sRr @uri)"
 
-URL="https://api.${REALM}.signalfx.com/v1/timeserieswindow?query=${ENCODED_QUERY}"
+URL="https://api.${REALM}.observability.splunkcloud.com/v1/timeserieswindow?query=${ENCODED_QUERY}"
 
 # Perform request; capture body and HTTP status separately
 response="$(curl -sS -L \

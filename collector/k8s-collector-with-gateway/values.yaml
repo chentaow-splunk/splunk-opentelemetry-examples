@@ -116,12 +116,12 @@ gateway:
           # Should be enabled to preserve incoming access token
           # include_metadata: true
         egress:
-          endpoint: "https://ingest.us1.signalfx.com"
+          endpoint: "https://ingest.us1.observability.splunkcloud.com"
       http_forwarder/alternate1:
         ingress:
           endpoint: "${SPLUNK_LISTEN_INTERFACE}:6061"
         egress:
-          endpoint: "https://api.eu0.signalfx.com"
+          endpoint: "https://api.eu0.observability.splunkcloud.com"
       http_forwarder/signalfx_alternate1:
         ingress:
           endpoint: "${SPLUNK_LISTEN_INTERFACE}:9944"
@@ -129,24 +129,24 @@ gateway:
           # Should be enabled to preserve incoming access token
           # include_metadata: true
         egress:
-          endpoint: "https://ingest.eu0.signalfx.com"
+          endpoint: "https://ingest.eu0.observability.splunkcloud.com"
     exporters:
       otlphttp/alternate1:
         auth:
           authenticator: headers_setter/alternate1
-        metrics_endpoint: "https://ingest.eu0.signalfx.com/v2/datapoint/otlp"
+        metrics_endpoint: "https://ingest.eu0.observability.splunkcloud.com/v2/datapoint/otlp"
         sending_queue:
           num_consumers: 32
-        traces_endpoint: "https://ingest.eu0.signalfx.com/v2/trace/otlp"
+        traces_endpoint: "https://ingest.eu0.observability.splunkcloud.com/v2/trace/otlp"
       otlphttp/entities_alternate1:
         auth:
           authenticator: headers_setter/alternate1
-        logs_endpoint: "https://ingest.eu0.signalfx.com/v3/event"
+        logs_endpoint: "https://ingest.eu0.observability.splunkcloud.com/v3/event"
       signalfx/alternate1:
         access_token: ${SPLUNK_ACCESS_TOKEN_ALTERNATE}
         access_token_passthrough: false
-        api_url: "https://api.eu0.signalfx.com"
-        ingest_url: "https://ingest.eu0.signalfx.com"
+        api_url: "https://api.eu0.observability.splunkcloud.com"
+        ingest_url: "https://ingest.eu0.observability.splunkcloud.com"
         sending_queue:
           num_consumers: 32
       splunk_hec/platform_logs_alternate1:

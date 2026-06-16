@@ -38,7 +38,7 @@ public class SplunkTelemetryConfigurator {
             .build();
 
         OtlpHttpSpanExporter spanExporter = OtlpHttpSpanExporter.builder()
-            .setEndpoint(String.format("https://ingest.%s.signalfx.com/v2/trace/otlp", realm))
+            .setEndpoint(String.format("https://ingest.%s.observability.splunkcloud.com/v2/trace/otlp", realm))
             .addHeader("X-SF-TOKEN", accessToken)
             .build();
 

@@ -22,7 +22,7 @@ The Collector owns scraping, enrichment, and export. Application teams keep expo
 ## Prerequisites
 
 * Splunk Observability Cloud realm, access token, API URL, and ingest URL.
-* Network access from the Collector host to each scrape target and to `https://api.<realm>.signalfx.com` and `https://ingest.<realm>.signalfx.com`.
+* Network access from the Collector host to each scrape target and to `https://api.<realm>.observability.splunkcloud.com` and `https://ingest.<realm>.observability.splunkcloud.com`.
 * A Collector build that includes the `prometheus` receiver, `memory_limiter`, `resourcedetection`, `resource`, `batch`, and `signalfx` components. The Splunk Distribution component list includes these components.
 * For authenticated HTTPS targets, a readable bearer token file or another Prometheus-supported authentication block, plus any required CA certificate.
 * A reviewed metric allow-list. The example allow-list is intentionally narrow and must be changed for your target names.
@@ -35,8 +35,8 @@ The Collector owns scraping, enrichment, and export. Application teams keep expo
 
    ```bash
    export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_API_URL='https://api.<realm>.signalfx.com'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.signalfx.com'
+   export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
    export DEPLOYMENT_ENVIRONMENT='<environment_name>'
    ```
 

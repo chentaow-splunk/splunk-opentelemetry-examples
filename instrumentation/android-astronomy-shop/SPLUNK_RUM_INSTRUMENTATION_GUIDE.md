@@ -86,7 +86,7 @@ object SplunkConfiguration {
     const val MOBILE_APP_VERSION = "1.0.0"
     const val APP_NAME = "YOUR_APP_NAME"
 
-    val ENDPOINT_URL = "https://rum-ingest.$REALM.signalfx.com/v1/rum"
+    val ENDPOINT_URL = "https://rum-ingest.$REALM.observability.splunkcloud.com/v1/rum"
 
     val isValid: Boolean
         get() = TOKEN.isNotEmpty()

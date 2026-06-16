@@ -22,7 +22,7 @@ The transform processor handles string bodies because it can apply `replace_patt
 
 ## Prerequisites
 
-* Splunk HEC token and HEC URL, for example `https://ingest.<realm>.signalfx.com/v1/log`.
+* Splunk HEC token and HEC URL, for example `https://ingest.<realm>.observability.splunkcloud.com/v1/log`.
 * A Collector build that includes the `transform` and `redaction` processors plus the `splunk_hec` exporter.
 * A reviewed list of blocked log key patterns and value patterns.
 * Synthetic test logs for plain text bodies, structured bodies, and log attributes.
@@ -36,7 +36,7 @@ The transform processor handles string bodies because it can apply `replace_patt
 
    ```bash
    export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.signalfx.com/v1/log'
+   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
    export DEPLOYMENT_ENVIRONMENT='<environment_name>'
    ```
 

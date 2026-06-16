@@ -84,7 +84,7 @@ enum SplunkConfiguration {
 ```
 
 **Where to get your token:**
-1. Log in to [Splunk Observability Cloud](https://app.signalfx.com)
+1. Log in to [Splunk Observability Cloud](https://app.observability.splunkcloud.com)
 2. Go to **Settings > Access Tokens**
 3. Click **Create New Token**, select **RUM** as the authorization scope
 4. Copy the token into `rumAccessToken` above
@@ -259,7 +259,7 @@ TextField("CVV", text: $cvv)
 
 ### Step 8: View Replays in Splunk
 
-1. Go to [Splunk Observability Cloud](https://app.signalfx.com)
+1. Go to [Splunk Observability Cloud](https://app.observability.splunkcloud.com)
 2. Navigate to **RUM > Session Replay**
 3. Select your app
 4. Filter by session, user, or time range
@@ -392,7 +392,7 @@ private func makeSpan(name: String) -> (any OpenTelemetryApi.Span)? {
 
 After running the instrumented app:
 
-1. Navigate to [Splunk Observability Cloud](https://app.signalfx.com)
+1. Navigate to [Splunk Observability Cloud](https://app.observability.splunkcloud.com)
 2. Go to **RUM** in the left sidebar
 3. Select your app name
 

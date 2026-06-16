@@ -147,7 +147,7 @@ configuration instead for [local.settings.json](./local.settings.json):
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "node",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://ingest.<Realm>.signalfx.com/v2/trace/otlp", 
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://ingest.<Realm>.observability.splunkcloud.com/v2/trace/otlp", 
     "OTEL_EXPORTER_OTLP_HEADERS": "X-SF-TOKEN=<Access Token>", 
     "OTEL_SERVICE_NAME": "azure-function-python-opentelemetry-example", 
     "OTEL_RESOURCE_ATTRIBUTES": "deployment.environment=test" 

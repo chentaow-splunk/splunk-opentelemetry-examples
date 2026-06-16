@@ -36,9 +36,9 @@ The redaction processor runs before export. It can redact span attributes, log a
    ```bash
    export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
    export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_API_URL='https://api.<realm>.signalfx.com'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.signalfx.com'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.signalfx.com/v1/log'
+   export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
    export DEPLOYMENT_ENVIRONMENT='<environment_name>'
    ```
 

@@ -9,7 +9,7 @@ PUBSUB_SUBSCRIPTION="dialogflow-logs-to-shim"
 LOG_SINK_NAME="dialogflow-to-pubsub"
 
 # OTLP destination (example: Splunk Observability Cloud, US1 realm)
-OTLP_ENDPOINT="https://ingest.${SPLUNK_REALM}.signalfx.com/v2/trace/otlp"
+OTLP_ENDPOINT="https://ingest.${SPLUNK_REALM}.observability.splunkcloud.com/v2/trace/otlp"
 OTLP_HEADERS="X-SF-Token=${SPLUNK_TOKEN}"
 
 # ===========================

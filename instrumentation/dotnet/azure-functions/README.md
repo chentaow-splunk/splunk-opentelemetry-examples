@@ -59,7 +59,7 @@ public static TracerProvider ConfigureSplunkTelemetry()
         .AddAzureAppServiceDetector())
     .AddOtlpExporter(opts =>
     {
-        opts.Endpoint = new Uri($"https://ingest.{realm}.signalfx.com/v2/trace/otlp");
+        opts.Endpoint = new Uri($"https://ingest.{realm}.observability.splunkcloud.com/v2/trace/otlp");
         opts.Protocol = OtlpExportProtocol.HttpProtobuf;
         opts.Headers = $"X-SF-TOKEN={accessToken}";
     }) 

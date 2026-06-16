@@ -37,7 +37,7 @@ The tail sampling processor buffers spans by trace ID, waits for enough of the t
 
    ```bash
    export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.signalfx.com'
+   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
    export DEPLOYMENT_ENVIRONMENT='<environment_name>'
    ```
 

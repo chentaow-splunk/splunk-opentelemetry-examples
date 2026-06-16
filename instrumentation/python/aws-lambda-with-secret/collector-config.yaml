@@ -10,9 +10,9 @@ exporters:
   otlphttp:
     tls:
       insecure_skip_verify: true
-    endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com:443"
-    traces_endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com:443/v2/trace/otlp"
-    metrics_endpoint: "https://ingest.${env:SPLUNK_REALM}.signalfx.com:443/v2/datapoint/otlp"
+    endpoint: "https://ingest.${env:SPLUNK_REALM}.observability.splunkcloud.com:443"
+    traces_endpoint: "https://ingest.${env:SPLUNK_REALM}.observability.splunkcloud.com:443/v2/trace/otlp"
+    metrics_endpoint: "https://ingest.${env:SPLUNK_REALM}.observability.splunkcloud.com:443/v2/datapoint/otlp"
     headers:
       "X-SF-TOKEN": "${secretsmanager:SPLUNK_ACCESS_TOKEN}"
 

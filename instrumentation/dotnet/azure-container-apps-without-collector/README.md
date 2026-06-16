@@ -66,7 +66,7 @@ az containerapp env telemetry otlp add \
   --resource-group containerapps-dotnet \
   --name containerapps-dotnet \
   --otlp-name "otlp1" \
-  --endpoint "ingest.${SPLUNK_REALM}.signalfx.com:443" \
+  --endpoint "ingest.${SPLUNK_REALM}.observability.splunkcloud.com:443" \
   --insecure false \
   --headers "X-SF-Token=${SPLUNK_ACCESS_TOKEN}" \
   --enable-open-telemetry-traces true
