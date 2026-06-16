@@ -133,20 +133,31 @@ Observed after:
 debug exporter output removed raw sensitive values, retained customer.id/message, and included redaction.masked.count audit evidence.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Result
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
 
 ```text
 Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: redact-sensitive-data-before-export-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAAL8_9s", "value": 7.0}
-```
 
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+Before unredacted metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:redact-sensitive-data-before-export-before-1781592936
+  count: 1
+  dimensions: {"api_key": "synthetic-api-key", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "279f77925ade", "os.type": "linux", "password": "synthetic-password", "payment.note": "card=4111111111111111", "service.name": "codex-redaction-before", "sf_metric": null, "validation_run_id": "redact-sensitive-data-before-export-before-1781592936"}
+  customProperties: {"api_key": "synthetic-api-key", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "279f77925ade", "os.type": "linux", "password": "synthetic-password", "payment.note": "card=4111111111111111", "service.name": "codex-redaction-before", "validation_run_id": "redact-sensitive-data-before-export-before-1781592936"}
+
+After redacted metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:redact-sensitive-data-before-export-after-1781592936
+  count: 1
+  dimensions: {"api_key": "****", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "32fa31ad3c56", "os.type": "linux", "password": "****", "payment.note": "card=****", "redaction.masked.count": "3", "service.name": "codex-redaction-after", "sf_metric": null, "validation_run_id": "redact-sensitive-data-before-export-after-1781592936"}
+  customProperties: {"api_key": "****", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "32fa31ad3c56", "os.type": "linux", "password": "****", "payment.note": "card=****", "redaction.masked.count": "3", "service.name": "codex-redaction-after", "validation_run_id": "redact-sensitive-data-before-export-after-1781592936"}
+```
 
 ## Why This Configuration
 

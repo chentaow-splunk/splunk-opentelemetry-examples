@@ -125,20 +125,50 @@ Observed after:
 debug exporter output contained the application metric and excluded the runtime metric by relabel rule.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Result
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
 
 ```text
 Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: prometheus-scrape-kubernetes-discovery-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAACDSFa4", "value": 2.0}
-```
 
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+Before retained service metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-kubernetes-discovery-before-1781592821
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "checkout", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
+  customProperties: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "checkout", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
+
+Before runtime-style metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-kubernetes-discovery-before-1781592821
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "runtime", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
+  customProperties: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "runtime", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
+
+After retained service metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-kubernetes-discovery-after-1781592821
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "f150d1916acc", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58236", "service": "checkout", "service.instance.id": "host.docker.internal:58236", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-after-1781592821"}
+  customProperties: {"deployment.environment": "validation", "host.name": "f150d1916acc", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58236", "service": "checkout", "service.instance.id": "host.docker.internal:58236", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-after-1781592821"}
+
+After runtime-style metric lookup:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: False
+  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-kubernetes-discovery-after-1781592821
+  count: 0
+  evidence: count=0
+  evidence: metric=None
+  evidence: dimensions={}
+```
 
 ## Why This Configuration
 

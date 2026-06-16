@@ -140,20 +140,31 @@ Observed after:
 debug exporter output contained password='***' and login token=***; removed authorization/cookie attributes and raw secret values.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Result
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
 
 ```text
 Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: transform-normalize-telemetry-before-export-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAIWda7Y", "value": 4.0}
-```
 
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+Before raw metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:transform-normalize-telemetry-before-export-before-1781592894
+  count: 1
+  dimensions: {"container_id": "containerd://synthetic-container", "deployment.environment": "validation", "host.name": "dd7dde4cc5c1", "k8s.namespace.name": "shop", "k8s.pod.name": "checkout-abc", "os.type": "linux", "pod_uid": "synthetic-pod-uid", "service.name": "codex-transform-before", "sf_metric": null, "validation_run_id": "transform-normalize-telemetry-before-export-before-1781592894"}
+  customProperties: {"container_id": "containerd://synthetic-container", "deployment.environment": "validation", "host.name": "dd7dde4cc5c1", "k8s.namespace.name": "shop", "k8s.pod.name": "checkout-abc", "os.type": "linux", "pod_uid": "synthetic-pod-uid", "service.name": "codex-transform-before", "validation_run_id": "transform-normalize-telemetry-before-export-before-1781592894"}
+
+After transformed metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:transform-normalize-telemetry-before-export-after-1781592894
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "66011db46896", "k8s.namespace.name": "shop", "k8s.pod.name": "checkout-abc", "os.type": "linux", "service.name": "codex-transform-after", "sf_metric": null, "validation_run_id": "transform-normalize-telemetry-before-export-after-1781592894"}
+  customProperties: {"deployment.environment": "validation", "host.name": "66011db46896", "k8s.namespace.name": "shop", "k8s.pod.name": "checkout-abc", "os.type": "linux", "service.name": "codex-transform-after", "validation_run_id": "transform-normalize-telemetry-before-export-after-1781592894"}
+```
 
 ## Why This Configuration
 

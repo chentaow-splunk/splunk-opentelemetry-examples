@@ -136,20 +136,50 @@ Observed after:
 debug exporter output retained GET /checkout, checkout_requests_total, and checkout failed; dropped the noisy samples.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Result
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
 
 ```text
 Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: filter-noisy-telemetry-before-export-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAJX6g9Y", "value": 3.0}
-```
 
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+Before health-route metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-before-health-1781592848
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/health", "os.type": "linux", "service.name": "codex-filter-before", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-before-health-1781592848"}
+  customProperties: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/health", "os.type": "linux", "service.name": "codex-filter-before", "validation_run_id": "filter-noisy-telemetry-before-export-before-health-1781592848"}
+
+Before checkout-route metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-before-checkout-1781592848
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-before", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-before-checkout-1781592848"}
+  customProperties: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-before", "validation_run_id": "filter-noisy-telemetry-before-export-before-checkout-1781592848"}
+
+After health-route lookup:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: False
+  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-after-health-1781592848
+  count: 0
+  evidence: count=0
+  evidence: metric=None
+  evidence: dimensions={}
+
+After checkout-route metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-after-checkout-1781592848
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "acd7bf48e79e", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-after", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-after-checkout-1781592848"}
+  customProperties: {"deployment.environment": "validation", "host.name": "acd7bf48e79e", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-after", "validation_run_id": "filter-noisy-telemetry-before-export-after-checkout-1781592848"}
+```
 
 ## Why This Configuration
 

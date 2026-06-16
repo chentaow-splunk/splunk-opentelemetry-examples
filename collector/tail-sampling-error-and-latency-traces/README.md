@@ -130,20 +130,16 @@ Observed after:
 debug exporter output retained GET /error and GET /slow; dropped GET /ordinary with baseline sampling set to 0 for deterministic validation.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Status
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Checked with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The local Collector payload validation passed, but backend payload validation for this signal was not performed in this environment.
 
 ```text
-Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: tail-sampling-error-and-latency-traces-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAENUgQQ", "value": 6.0}
+Not performed.
+This cookbook processes traces. The available API token validates metrics through SignalFlow and metric time-series metadata, but this harness does not have a verified Splunk APM trace-search API path for span-level backend assertions.
+The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.
+Backend validation is required; local health alone does not prove ingestion.
 ```
-
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
 
 ## Why This Configuration
 

@@ -130,20 +130,16 @@ Observed after:
 debug exporter output retained 36 unique records, consistent with percentage sampling over a small local test.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Status
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Checked with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The local Collector payload validation passed, but backend payload validation for this signal was not performed in this environment.
 
 ```text
-Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: probabilistic-sampling-before-export-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAA7cz3A", "value": 5.0}
+Not performed.
+This cookbook processes logs. No SPLUNK_HEC_TOKEN or Splunk log-query endpoint is configured in .env, so I cannot honestly query the ingested log body or log attributes in Splunk.
+The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.
+Backend validation is required; local health alone does not prove ingestion.
 ```
-
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
 
 ## Why This Configuration
 

@@ -55,6 +55,18 @@ class BackendQueryResult:
     values: list[object] = field(default_factory=list)
 
 
+@dataclass
+class MetricTimeseriesResult:
+    found: bool
+    http_status: int
+    metric: str
+    query: str
+    count: int = 0
+    dimensions: dict[str, object] = field(default_factory=dict)
+    custom_properties: dict[str, object] = field(default_factory=dict)
+    evidence: list[str] = field(default_factory=list)
+
+
 def run(
     cmd: list[str],
     *,
@@ -535,6 +547,92 @@ def signalflow_query(
     return BackendQueryResult(found, status, metric, dimensions, evidence[-8:], values[:5])
 
 
+def api_get_json(path: str, query_params: dict[str, str], env: dict[str, str], *, timeout: int = 30) -> tuple[int, dict]:
+    query = urlencode(query_params)
+    url = f"{env['SPLUNK_API_URL']}{path}"
+    if query:
+        url = f"{url}?{query}"
+    req = Request(url, headers={"X-SF-TOKEN": env["SPLUNK_API_TOKEN"]}, method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, json.loads(body)
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return exc.code, {"error": " ".join(body.split())[:500]}
+    except (URLError, TimeoutError, socket.timeout) as exc:
+        return 0, {"error": str(exc)}
+
+
+def metric_timeseries_query(metric: str, dimensions: dict[str, str], env: dict[str, str]) -> MetricTimeseriesResult:
+    terms = [f"sf_metric:{metric}"]
+    terms.extend(f"{key}:{value}" for key, value in dimensions.items())
+    query = " AND ".join(terms)
+    status, payload = api_get_json("/v2/metrictimeseries", {"query": query}, env)
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    first = results[0] if results else {}
+    evidence = [f"query={query}", f"count={payload.get('count', 0) if isinstance(payload, dict) else 0}"]
+    if isinstance(first, dict):
+        evidence.append(f"metric={first.get('metric')}")
+        evidence.append(f"dimensions={json.dumps(first.get('dimensions', {}), sort_keys=True)}")
+        custom = first.get("customProperties", {})
+        if custom:
+            evidence.append(f"customProperties={json.dumps(custom, sort_keys=True)}")
+    elif isinstance(payload, dict) and payload.get("error"):
+        evidence.append(str(payload["error"]))
+    return MetricTimeseriesResult(
+        bool(results),
+        status,
+        metric,
+        query,
+        int(payload.get("count", 0)) if isinstance(payload, dict) and str(payload.get("count", "")).isdigit() else len(results),
+        first.get("dimensions", {}) if isinstance(first, dict) else {},
+        first.get("customProperties", {}) if isinstance(first, dict) else {},
+        evidence,
+    )
+
+
+def wait_metric_timeseries(
+    metric: str,
+    dimensions: dict[str, str],
+    env: dict[str, str],
+    *,
+    timeout: int = 180,
+) -> MetricTimeseriesResult:
+    deadline = time.time() + timeout
+    last = metric_timeseries_query(metric, dimensions, env)
+    while not last.found and time.time() < deadline:
+        time.sleep(10)
+        last = metric_timeseries_query(metric, dimensions, env)
+    return last
+
+
+def format_metric_timeseries(label: str, result: MetricTimeseriesResult) -> str:
+    lines = [
+        f"{label}:",
+        f"  API: /v2/metrictimeseries",
+        f"  HTTP status: {result.http_status}",
+        f"  found: {result.found}",
+        f"  query: {result.query}",
+        f"  count: {result.count}",
+    ]
+    if result.dimensions:
+        lines.append(f"  dimensions: {json.dumps(result.dimensions, sort_keys=True)}")
+    if result.custom_properties:
+        lines.append(f"  customProperties: {json.dumps(result.custom_properties, sort_keys=True)}")
+    if not result.found and result.evidence:
+        lines.extend(f"  evidence: {item}" for item in result.evidence[-3:])
+    return "\n".join(lines)
+
+
+def exporter_errors(logs: str) -> list[str]:
+    return [
+        line
+        for line in logs.splitlines()
+        if "Exporting failed" in line or "Permanent error" in line or "Unauthorized" in line
+    ]
+
+
 def validate_prometheus_static(workdir: Path) -> ValidationResult:
     slug = "prometheus-scrape-to-splunk"
     body = """# HELP http_server_requests_total Synthetic retained counter
@@ -648,7 +746,7 @@ def validate_backend_probe(workdir: Path, env: dict[str, str]) -> ValidationResu
         f"SignalFlow found series: {query.found}.",
     ]
     if query.values:
-        observed_after.append(f"First SignalFlow data event: {json.dumps(query.values[0], sort_keys=True)[:500]}")
+        observed_after.append(f"First SignalFlow data point: {json.dumps(query.values[0], sort_keys=True)[:500]}")
     else:
         observed_after.extend(query.evidence[-3:])
     errors = exporter_errors + ([] if query.found else ["SignalFlow did not return a non-empty data event for the exported metric"])
@@ -665,90 +763,461 @@ def validate_backend_probe(workdir: Path, env: dict[str, str]) -> ValidationResu
     )
 
 
-def attach_backend_markers(
+def run_backend_metric_config(
+    slug: str,
+    config: str,
+    workdir: Path,
+    env: dict[str, str],
+    metrics: list[dict],
+    *,
+    service: str,
+    post_delay: int = 20,
+) -> int:
+    start_unix = int(time.time())
+    port = free_port()
+    collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
+    with CollectorRun(slug, config, workdir, {port: 4318}, collector_env) as collector:
+        post_json(f"http://127.0.0.1:{port}/v1/metrics", metrics_payload(metrics, service=service))
+        time.sleep(post_delay)
+        logs = collector.logs()
+    errors = exporter_errors(logs)
+    if errors:
+        raise RuntimeError("\n".join(errors[:5]))
+    return start_unix
+
+
+def backend_common_metric_config(env: dict[str, str], processors: str, processor_names: list[str]) -> str:
+    return join_config(
+        otlp_receiver(),
+        base_processors(processors),
+        signalfx_exporter(env["SPLUNK_REALM"]),
+        service_metrics_export(processor_names, "signalfx"),
+    )
+
+
+def validate_backend_prometheus_static(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "prometheus-scrape-to-splunk"
+    started = int(time.time())
+    before_id = f"{slug}-before-{started}"
+    after_id = f"{slug}-after-{started}"
+    retained_metric = "test_requests_total"
+    dropped_metric = "test_connections_active"
+
+    def run_scrape(run_id: str, *, keep_only_retained: bool) -> None:
+        body = f"""# HELP test_requests_total Synthetic retained counter
+# TYPE test_requests_total counter
+test_requests_total{{validation_run_id="{run_id}",recipe_slug="{slug}",route="/checkout"}} 71
+# HELP test_connections_active Synthetic dropped gauge
+# TYPE test_connections_active gauge
+test_connections_active{{validation_run_id="{run_id}",recipe_slug="{slug}",route="/internal"}} 9
+"""
+        relabel = ""
+        if keep_only_retained:
+            relabel = textwrap.indent(
+                textwrap.dedent(
+                    """
+                    metric_relabel_configs:
+                      - source_labels: [__name__]
+                        regex: "(test_requests_total)"
+                        action: keep
+                    """
+                ).strip(),
+                "          ",
+            )
+        with MetricsServer(body) as server:
+            receivers = textwrap.dedent(
+                f"""
+                receivers:
+                  prometheus/static_targets:
+                    config:
+                      scrape_configs:
+                        - job_name: app-metrics-backend-validation
+                          scrape_interval: 1s
+                          scrape_timeout: 1s
+                          metrics_path: /metrics
+                          static_configs:
+                            - targets: ["host.docker.internal:{server.port}"]
+                """
+            ).rstrip()
+            if relabel:
+                receivers = f"{receivers}\n{relabel}"
+            service = textwrap.dedent(
+                """
+                service:
+                  telemetry:
+                    logs:
+                      level: info
+                  pipelines:
+                    metrics:
+                      receivers: [prometheus/static_targets]
+                      processors: [memory_limiter, resourcedetection, resource/splunk_context, batch]
+                      exporters: [signalfx]
+                """
+            )
+            config = join_config(receivers, base_processors(""), signalfx_exporter(env["SPLUNK_REALM"]), service)
+            collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
+            with CollectorRun(f"{slug}-backend", config, workdir, env=collector_env):
+                time.sleep(12)
+
+    try:
+        run_scrape(before_id, keep_only_retained=False)
+        before_retained = wait_metric_timeseries(retained_metric, {"validation_run_id": before_id}, env)
+        before_dropped = wait_metric_timeseries(dropped_metric, {"validation_run_id": before_id}, env)
+        run_scrape(after_id, keep_only_retained=True)
+        after_retained = wait_metric_timeseries(retained_metric, {"validation_run_id": after_id}, env)
+        after_dropped = metric_timeseries_query(dropped_metric, {"validation_run_id": after_id}, env)
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(slug, "Prometheus Scraping to Splunk", False, "Backend payload validation crashed.", errors=[f"{type(exc).__name__}: {exc}"])
+
+    errors: list[str] = []
+    if not before_retained.found:
+        errors.append("before run did not expose retained metric in Splunk")
+    if not before_dropped.found:
+        errors.append("before run did not expose metric that should be dropped after relabeling")
+    if not after_retained.found:
+        errors.append("after run did not expose retained metric in Splunk")
+    if after_dropped.found:
+        errors.append("after run still exposed the metric that the relabel keep rule should drop")
+    backend = "\n\n".join(
+        [
+            f"Splunk realm: {env['SPLUNK_REALM']}",
+            format_metric_timeseries("Before retained metric", before_retained),
+            format_metric_timeseries("Before metric that should be dropped after relabel", before_dropped),
+            format_metric_timeseries("After retained metric", after_retained),
+            format_metric_timeseries("After dropped metric lookup", after_dropped),
+        ]
+    )
+    return ValidationResult(slug, "Prometheus Scraping to Splunk", not errors, "Queried Splunk metric time-series metadata for the scraped metric before and after applying the relabel keep rule.", {"backend": backend}, errors)
+
+
+def validate_backend_prometheus_kubernetes(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "prometheus-scrape-kubernetes-discovery"
+    started = int(time.time())
+    before_id = f"{slug}-before-{started}"
+    after_id = f"{slug}-after-{started}"
+    retained_metric = "test_requests_total"
+    dropped_metric = "test_connections_active"
+
+    def run_scrape(run_id: str, *, keep_only_retained: bool) -> None:
+        body = f"""# HELP test_requests_total Synthetic retained service counter
+# TYPE test_requests_total counter
+test_requests_total{{validation_run_id="{run_id}",service="checkout",k8s_namespace_name="shop"}} 82
+# HELP test_connections_active Synthetic runtime-style metric
+# TYPE test_connections_active gauge
+test_connections_active{{validation_run_id="{run_id}",service="runtime",k8s_namespace_name="shop"}} 14
+"""
+        relabel = ""
+        if keep_only_retained:
+            relabel = textwrap.indent(
+                textwrap.dedent(
+                    """
+                    metric_relabel_configs:
+                      - source_labels: [__name__]
+                        regex: "(test_requests_total)"
+                        action: keep
+                    """
+                ).strip(),
+                "          ",
+            )
+        with MetricsServer(body) as server:
+            receivers = textwrap.dedent(
+                f"""
+                receivers:
+                  prometheus/kubernetes_services:
+                    config:
+                      scrape_configs:
+                        - job_name: kubernetes-service-metrics-backend-validation
+                          scrape_interval: 1s
+                          scrape_timeout: 1s
+                          static_configs:
+                            - targets: ["host.docker.internal:{server.port}"]
+                """
+            ).rstrip()
+            if relabel:
+                receivers = f"{receivers}\n{relabel}"
+            service = textwrap.dedent(
+                """
+                service:
+                  telemetry:
+                    logs:
+                      level: info
+                  pipelines:
+                    metrics:
+                      receivers: [prometheus/kubernetes_services]
+                      processors: [memory_limiter, resourcedetection, resource/splunk_context, batch]
+                      exporters: [signalfx]
+                """
+            )
+            config = join_config(receivers, base_processors(""), signalfx_exporter(env["SPLUNK_REALM"]), service)
+            collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
+            with CollectorRun(f"{slug}-backend", config, workdir, env=collector_env):
+                time.sleep(12)
+
+    try:
+        run_scrape(before_id, keep_only_retained=False)
+        before_retained = wait_metric_timeseries(retained_metric, {"validation_run_id": before_id}, env)
+        before_dropped = wait_metric_timeseries(dropped_metric, {"validation_run_id": before_id}, env)
+        run_scrape(after_id, keep_only_retained=True)
+        after_retained = wait_metric_timeseries(retained_metric, {"validation_run_id": after_id}, env)
+        after_dropped = metric_timeseries_query(dropped_metric, {"validation_run_id": after_id}, env)
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(slug, "Prometheus Scraping with Kubernetes Discovery", False, "Backend payload validation crashed.", errors=[f"{type(exc).__name__}: {exc}"])
+
+    errors: list[str] = []
+    if not before_retained.found:
+        errors.append("before run did not expose retained service metric in Splunk")
+    if not before_dropped.found:
+        errors.append("before run did not expose runtime-style metric in Splunk")
+    if not after_retained.found:
+        errors.append("after run did not expose retained service metric in Splunk")
+    if after_dropped.found:
+        errors.append("after run still exposed the runtime-style metric that should be excluded")
+    backend = "\n\n".join(
+        [
+            f"Splunk realm: {env['SPLUNK_REALM']}",
+            format_metric_timeseries("Before retained service metric", before_retained),
+            format_metric_timeseries("Before runtime-style metric", before_dropped),
+            format_metric_timeseries("After retained service metric", after_retained),
+            format_metric_timeseries("After runtime-style metric lookup", after_dropped),
+        ]
+    )
+    return ValidationResult(slug, "Prometheus Scraping with Kubernetes Discovery", not errors, "Queried Splunk metric time-series metadata for the synthetic Kubernetes-service scrape before and after the relabel keep rule.", {"backend": backend}, errors)
+
+
+def validate_backend_filter(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "filter-noisy-telemetry-before-export"
+    started = int(time.time())
+    metric = "test_requests_total"
+    before_health = f"{slug}-before-health-{started}"
+    before_checkout = f"{slug}-before-checkout-{started}"
+    after_health = f"{slug}-after-health-{started}"
+    after_checkout = f"{slug}-after-checkout-{started}"
+    now = int(time.time()) * 1_000_000_000
+    no_filter = backend_common_metric_config(env, "", ["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"])
+    filter_config = backend_common_metric_config(
+        env,
+        """
+        filter/noise:
+          error_mode: ignore
+          metric_conditions:
+            - 'datapoint.attributes["http.route"] == "/health"'
+        """,
+        ["memory_limiter", "filter/noise", "resourcedetection", "resource/splunk_context", "batch"],
+    )
+
+    try:
+        run_backend_metric_config(
+            f"{slug}-backend-before",
+            no_filter,
+            workdir,
+            env,
+            [
+                gauge_metric(metric, 1, attrs={"validation_run_id": before_health, "http.route": "/health", "service.name": "checkout"}, time_unix_nano=now),
+                gauge_metric(metric, 2, attrs={"validation_run_id": before_checkout, "http.route": "/checkout", "service.name": "checkout"}, time_unix_nano=now),
+            ],
+            service="codex-filter-before",
+        )
+        before_health_result = wait_metric_timeseries(metric, {"validation_run_id": before_health}, env)
+        before_checkout_result = wait_metric_timeseries(metric, {"validation_run_id": before_checkout}, env)
+        run_backend_metric_config(
+            f"{slug}-backend-after",
+            filter_config,
+            workdir,
+            env,
+            [
+                gauge_metric(metric, 3, attrs={"validation_run_id": after_health, "http.route": "/health", "service.name": "checkout"}, time_unix_nano=now + 1_000_000_000),
+                gauge_metric(metric, 4, attrs={"validation_run_id": after_checkout, "http.route": "/checkout", "service.name": "checkout"}, time_unix_nano=now + 1_000_000_000),
+            ],
+            service="codex-filter-after",
+        )
+        after_health_result = metric_timeseries_query(metric, {"validation_run_id": after_health}, env)
+        after_checkout_result = wait_metric_timeseries(metric, {"validation_run_id": after_checkout}, env)
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(slug, "Filter Noisy Telemetry Before Export", False, "Backend payload validation crashed.", errors=[f"{type(exc).__name__}: {exc}"])
+
+    errors: list[str] = []
+    if not before_health_result.found:
+        errors.append("before run did not expose health-route metric in Splunk")
+    if not before_checkout_result.found:
+        errors.append("before run did not expose checkout-route metric in Splunk")
+    if after_health_result.found:
+        errors.append("after run still exposed health-route metric that filter/noise should drop")
+    if not after_checkout_result.found:
+        errors.append("after run did not expose checkout-route metric in Splunk")
+    backend = "\n\n".join(
+        [
+            f"Splunk realm: {env['SPLUNK_REALM']}",
+            format_metric_timeseries("Before health-route metric", before_health_result),
+            format_metric_timeseries("Before checkout-route metric", before_checkout_result),
+            format_metric_timeseries("After health-route lookup", after_health_result),
+            format_metric_timeseries("After checkout-route metric", after_checkout_result),
+        ]
+    )
+    return ValidationResult(slug, "Filter Noisy Telemetry Before Export", not errors, "Queried Splunk metric time-series metadata to prove the health-route datapoint was dropped while checkout telemetry remained.", {"backend": backend}, errors)
+
+
+def validate_backend_transform(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "transform-normalize-telemetry-before-export"
+    started = int(time.time())
+    metric = "test_requests_total"
+    before_id = f"{slug}-before-{started}"
+    after_id = f"{slug}-after-{started}"
+    now = int(time.time()) * 1_000_000_000
+    no_transform = backend_common_metric_config(env, "", ["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"])
+    transform_config = backend_common_metric_config(
+        env,
+        """
+        transform/normalize:
+          error_mode: ignore
+          metric_statements:
+            - context: datapoint
+              statements:
+                - delete_key(attributes, "pod_uid")
+                - delete_key(attributes, "container_id")
+                - limit(attributes, 64, ["service.name", "k8s.namespace.name", "k8s.pod.name", "validation_run_id"])
+        """,
+        ["memory_limiter", "transform/normalize", "resourcedetection", "resource/splunk_context", "batch"],
+    )
+    attrs_common = {
+        "service.name": "checkout",
+        "k8s.namespace.name": "shop",
+        "k8s.pod.name": "checkout-abc",
+        "pod_uid": "synthetic-pod-uid",
+        "container_id": "containerd://synthetic-container",
+    }
+    try:
+        run_backend_metric_config(f"{slug}-backend-before", no_transform, workdir, env, [gauge_metric(metric, 5, attrs={"validation_run_id": before_id, **attrs_common}, time_unix_nano=now)], service="codex-transform-before")
+        before_result = wait_metric_timeseries(metric, {"validation_run_id": before_id}, env)
+        run_backend_metric_config(f"{slug}-backend-after", transform_config, workdir, env, [gauge_metric(metric, 6, attrs={"validation_run_id": after_id, **attrs_common}, time_unix_nano=now + 1_000_000_000)], service="codex-transform-after")
+        after_result = wait_metric_timeseries(metric, {"validation_run_id": after_id}, env)
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(slug, "Transform and Normalize Telemetry Before Export", False, "Backend payload validation crashed.", errors=[f"{type(exc).__name__}: {exc}"])
+
+    before_meta = json.dumps({**before_result.dimensions, **before_result.custom_properties}, sort_keys=True)
+    after_meta = json.dumps({**after_result.dimensions, **after_result.custom_properties}, sort_keys=True)
+    errors: list[str] = []
+    if not before_result.found:
+        errors.append("before run did not expose metric in Splunk")
+    if "synthetic-pod-uid" not in before_meta or "synthetic-container" not in before_meta:
+        errors.append("before run did not show the pod_uid/container_id dimensions expected for the raw sample")
+    if not after_result.found:
+        errors.append("after run did not expose transformed metric in Splunk")
+    if "synthetic-pod-uid" in after_meta or "synthetic-container" in after_meta:
+        errors.append("after run still exposed pod_uid/container_id dimensions")
+    if "checkout-abc" not in after_meta or "shop" not in after_meta:
+        errors.append("after run did not retain expected safe Kubernetes dimensions")
+    backend = "\n\n".join([f"Splunk realm: {env['SPLUNK_REALM']}", format_metric_timeseries("Before raw metric", before_result), format_metric_timeseries("After transformed metric", after_result)])
+    return ValidationResult(slug, "Transform and Normalize Telemetry Before Export", not errors, "Queried Splunk metric time-series metadata to prove pod_uid/container_id were removed while stable service and Kubernetes dimensions remained.", {"backend": backend}, errors)
+
+
+def validate_backend_redaction(workdir: Path, env: dict[str, str]) -> ValidationResult:
+    slug = "redact-sensitive-data-before-export"
+    started = int(time.time())
+    metric = "test_requests_total"
+    before_id = f"{slug}-before-{started}"
+    after_id = f"{slug}-after-{started}"
+    now = int(time.time()) * 1_000_000_000
+    no_redaction = backend_common_metric_config(env, "", ["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"])
+    redaction_config = backend_common_metric_config(
+        env,
+        """
+        redaction/sensitive:
+          allow_all_keys: true
+          redact_all_types: true
+          blocked_key_patterns:
+            - "(?i).*password.*"
+            - "(?i).*token.*"
+            - "(?i).*api[_-]?key.*"
+            - "(?i).*authorization.*"
+          blocked_values:
+            - "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\\\s,;]+)"
+            - "\\\\b4[0-9]{12}(?:[0-9]{3})?\\\\b"
+          summary: info
+        """,
+        ["memory_limiter", "redaction/sensitive", "resourcedetection", "resource/splunk_context", "batch"],
+    )
+    sensitive_attrs = {
+        "api_key": "synthetic-api-key",
+        "password": "synthetic-password",
+        "customer.id": "customer-123",
+        "payment.note": "card=4111111111111111",
+    }
+    try:
+        run_backend_metric_config(f"{slug}-backend-before", no_redaction, workdir, env, [gauge_metric(metric, 7, attrs={"validation_run_id": before_id, **sensitive_attrs}, time_unix_nano=now)], service="codex-redaction-before")
+        before_result = wait_metric_timeseries(metric, {"validation_run_id": before_id}, env)
+        run_backend_metric_config(f"{slug}-backend-after", redaction_config, workdir, env, [gauge_metric(metric, 8, attrs={"validation_run_id": after_id, **sensitive_attrs}, time_unix_nano=now + 1_000_000_000)], service="codex-redaction-after")
+        after_result = wait_metric_timeseries(metric, {"validation_run_id": after_id}, env)
+    except Exception as exc:  # noqa: BLE001
+        return ValidationResult(slug, "Redact Sensitive Data Before Export", False, "Backend payload validation crashed.", errors=[f"{type(exc).__name__}: {exc}"])
+
+    before_meta = json.dumps({**before_result.dimensions, **before_result.custom_properties}, sort_keys=True)
+    after_meta = json.dumps({**after_result.dimensions, **after_result.custom_properties}, sort_keys=True)
+    errors: list[str] = []
+    if not before_result.found:
+        errors.append("before run did not expose unredacted metric in Splunk")
+    for raw in ("synthetic-api-key", "synthetic-password", "4111111111111111"):
+        if raw not in before_meta:
+            errors.append(f"before run did not show expected raw sensitive value {raw}")
+        if raw in after_meta:
+            errors.append(f"after run still exposed raw sensitive value {raw}")
+    if not after_result.found:
+        errors.append("after run did not expose redacted metric in Splunk")
+    if "customer-123" not in after_meta:
+        errors.append("after run did not retain safe customer.id dimension")
+    if "redaction.masked.count" not in after_meta:
+        errors.append("after run did not expose redaction.masked.count audit metadata")
+    backend = "\n\n".join([f"Splunk realm: {env['SPLUNK_REALM']}", format_metric_timeseries("Before unredacted metric", before_result), format_metric_timeseries("After redacted metric", after_result)])
+    return ValidationResult(slug, "Redact Sensitive Data Before Export", not errors, "Queried Splunk metric time-series metadata to prove raw sensitive dimension values were absent after redaction while safe metadata remained.", {"backend": backend}, errors)
+
+
+def backend_unavailable_result(slug: str, title: str, reason: str) -> ValidationResult:
+    return ValidationResult(
+        slug,
+        title,
+        True,
+        "Backend payload validation was not performed for this signal in the current environment.",
+        {
+            "backend": "\n".join(
+                [
+                    "Not performed.",
+                    reason,
+                    "The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.",
+                    "Backend validation is required; local health alone does not prove ingestion.",
+                ]
+            )
+        },
+    )
+
+
+def attach_backend_payload_evidence(
     workdir: Path,
     env: dict[str, str],
     local_results: list[ValidationResult],
 ) -> list[ValidationResult]:
-    marker_metric = "test_requests_total"
-    started = int(time.time())
-    markers: dict[str, tuple[str, int]] = {}
-    config = join_config(
-        otlp_receiver(),
-        base_processors(""),
-        signalfx_exporter(env["SPLUNK_REALM"]),
-        service_metrics_export(["memory_limiter", "resourcedetection", "resource/splunk_context", "batch"], "signalfx"),
-    )
-    port = free_port()
-    collector_env = {"SPLUNK_ACCESS_TOKEN": env["SPLUNK_ACCESS_TOKEN"]}
-    with CollectorRun("backend-cookbook-markers", config, workdir, {port: 4318}, collector_env):
-        for idx, item in enumerate(local_results, start=1):
-            if not item.passed:
-                continue
-            run_id = f"{item.slug}-{started}"
-            markers[item.slug] = (run_id, idx)
-            post_json(
-                f"http://127.0.0.1:{port}/v1/metrics",
-                metrics_payload(
-                    [
-                        gauge_metric(
-                            marker_metric,
-                            idx,
-                            attrs={
-                                "validation_run_id": run_id,
-                                "cookbook_slug": item.slug,
-                                "validation_backend": "splunk-us0-signalflow",
-                            },
-                            time_unix_nano=(started + idx) * 1_000_000_000,
-                        )
-                    ],
-                    service="codex-cookbook-backend-validation",
-                ),
-            )
-        time.sleep(30)
-
-    time.sleep(90)
+    backend_validators = {
+        "prometheus-scrape-to-splunk": validate_backend_prometheus_static,
+        "prometheus-scrape-kubernetes-discovery": validate_backend_prometheus_kubernetes,
+        "filter-noisy-telemetry-before-export": validate_backend_filter,
+        "transform-normalize-telemetry-before-export": validate_backend_transform,
+        "redact-sensitive-data-before-export": validate_backend_redaction,
+    }
+    unsupported = {
+        "probabilistic-sampling-before-export": "This cookbook processes logs. No SPLUNK_HEC_TOKEN or Splunk log-query endpoint is configured in .env, so I cannot honestly query the ingested log body or log attributes in Splunk.",
+        "tail-sampling-error-and-latency-traces": "This cookbook processes traces. The available API token validates metrics through SignalFlow and metric time-series metadata, but this harness does not have a verified Splunk APM trace-search API path for span-level backend assertions.",
+        "redact-logs-before-splunk-export": "This cookbook processes log bodies and log attributes. No SPLUNK_HEC_TOKEN or Splunk log-query endpoint is configured in .env, so I cannot honestly query the ingested log body or log attributes in Splunk.",
+    }
     combined: list[ValidationResult] = []
     for item in local_results:
-        marker = markers.get(item.slug)
-        if not marker:
-            combined.append(item)
-            continue
-        run_id, expected_value = marker
-        query = signalflow_query(
-            marker_metric,
-            {"validation_run_id": run_id},
-            env,
-            start_unix=started - 120,
-            stop_unix=int(time.time()) + 240,
-        )
-        backend_lines = [
-            f"Splunk realm: {env['SPLUNK_REALM']}",
-            f"SignalFlow metric: {marker_metric}",
-            f"validation_run_id: {run_id}",
-            f"SignalFlow HTTP status: {query.http_status}",
-            f"SignalFlow found series: {query.found}",
-        ]
-        if query.values:
-            backend_lines.append(f"SignalFlow data event: {json.dumps(query.values[0], sort_keys=True)[:500]}")
+        backend_result: ValidationResult | None = None
+        validator = backend_validators.get(item.slug)
+        if validator and item.passed:
+            backend_result = validator(workdir, env)
+        elif item.slug in unsupported:
+            backend_result = backend_unavailable_result(item.slug, item.title, unsupported[item.slug])
+        if backend_result:
+            combined.append(ValidationResult(item.slug, item.title, item.passed and backend_result.passed, item.summary, {**item.observed, "backend": backend_result.observed.get("backend", "")}, [*item.errors, *backend_result.errors]))
         else:
-            backend_lines.extend(query.evidence[-3:])
-        errors = list(item.errors)
-        if not query.found:
-            errors.append(f"Splunk backend marker was not queryable for validation_run_id={run_id}")
-        combined.append(
-            ValidationResult(
-                item.slug,
-                item.title,
-                item.passed and query.found,
-                item.summary,
-                {
-                    **item.observed,
-                    "backend": "\n".join(backend_lines),
-                },
-                errors,
-            )
-        )
+            combined.append(item)
     return combined
 
 
@@ -1225,7 +1694,7 @@ def write_markdown(results: list[ValidationResult], output: Path) -> None:
         "",
         f"Collector image: `{IMAGE}`",
         "",
-        "These results were produced by `scripts/validate_collector_cookbooks.py` using local Collector containers, synthetic telemetry, and debug exporter output. When `Observed Splunk backend` is present, the run also emitted a backend marker through the Collector `signalfx` exporter and queried it with Splunk Observability Cloud SignalFlow.",
+        "These results were produced by `scripts/validate_collector_cookbooks.py` using local Collector containers and synthetic telemetry. Local checks inspect the processed debug-exporter payload. When `Observed Splunk backend` is present, metric-capable cookbooks also export before/after samples through the Collector `signalfx` exporter and query Splunk Observability Cloud metric time-series metadata for the actual ingested dimensions.",
         "",
     ]
     for item in results:
@@ -1272,7 +1741,7 @@ def main() -> int:
     parser.add_argument("--keep-containers", action="store_true")
     parser.add_argument("--only", action="append", default=[], help="Run only validators with this function name.")
     parser.add_argument("--backend-probe", action="store_true", help="Validate Collector signalfx export with Splunk backend API.")
-    parser.add_argument("--backend-cookbooks", action="store_true", help="Run local validations and add Splunk backend marker validation for each passing cookbook.")
+    parser.add_argument("--backend-cookbooks", action="store_true", help="Run local validations and add Splunk backend payload validation where a verified query path is available.")
     parser.add_argument("--realm", default="us0")
     parser.add_argument("--env-file", default=str(ROOT.parent / ".env"))
     args = parser.parse_args()
@@ -1285,13 +1754,13 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="collector-cookbook-validation-", dir="/private/tmp") as tmp:
         workdir = Path(tmp)
         results: list[ValidationResult] = []
-        backend_marker_env: dict[str, str] | None = None
+        backend_payload_env: dict[str, str] | None = None
         if args.backend_probe:
             env = backend_env(Path(args.env_file), args.realm)
             validators = [lambda workdir: validate_backend_probe(workdir, env)]
         else:
             if args.backend_cookbooks:
-                backend_marker_env = backend_env(Path(args.env_file), args.realm)
+                backend_payload_env = backend_env(Path(args.env_file), args.realm)
             validators = [
                 validator
                 for validator in VALIDATORS
@@ -1314,11 +1783,12 @@ def main() -> int:
             for error in result.errors:
                 print(f"  - {error}")
 
-        if backend_marker_env:
-            print("START backend marker validation", flush=True)
-            results = attach_backend_markers(workdir, backend_marker_env, results)
+        if backend_payload_env:
+            print("START backend payload validation", flush=True)
+            results = attach_backend_payload_evidence(workdir, backend_payload_env, results)
             for result in results:
-                backend_status = "PASS" if result.passed else "FAIL"
+                backend_text = result.observed.get("backend", "")
+                backend_status = "SKIP" if backend_text.startswith("Not performed.") else ("PASS" if result.passed else "FAIL")
                 print(f"{backend_status} backend {result.slug}")
                 for error in result.errors:
                     print(f"  - {error}")

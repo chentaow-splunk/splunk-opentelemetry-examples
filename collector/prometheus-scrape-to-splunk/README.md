@@ -127,20 +127,50 @@ Observed after:
 debug exporter output contained http_server_requests_total with deployment.environment=validation; excluded promhttp_metric_handler_requests_total was not exported.
 ```
 
-### Splunk Backend Validation Result
+### Splunk Backend Payload Validation Result
 
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. After the local Collector before/after check passed, the validator emitted a backend marker metric through the Collector `signalfx` exporter and confirmed it with Splunk Observability Cloud SignalFlow. The marker uses existing metric `test_requests_total` because this org did not register brand-new custom metric names during validation.
+Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
 
 ```text
 Splunk realm: us0
-SignalFlow metric: test_requests_total
-validation_run_id: prometheus-scrape-to-splunk-1781588783
-SignalFlow HTTP status: 200
-SignalFlow found series: True
-SignalFlow data event: {"tsId": "AAAAAI9jZ70", "value": 1.0}
-```
 
-This proves backend ingest and API queryability for this validation run. The local debug-exporter output above is the processor-specific before/after evidence.
+Before retained metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-to-splunk-before-1781592789
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
+  customProperties: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
+
+Before metric that should be dropped after relabel:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-to-splunk-before-1781592789
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/internal", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
+  customProperties: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/internal", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
+
+After retained metric:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: True
+  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-to-splunk-after-1781592789
+  count: 1
+  dimensions: {"deployment.environment": "validation", "host.name": "2aa93f94923f", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58175", "service.instance.id": "host.docker.internal:58175", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-after-1781592789"}
+  customProperties: {"deployment.environment": "validation", "host.name": "2aa93f94923f", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58175", "service.instance.id": "host.docker.internal:58175", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-after-1781592789"}
+
+After dropped metric lookup:
+  API: /v2/metrictimeseries
+  HTTP status: 200
+  found: False
+  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-to-splunk-after-1781592789
+  count: 0
+  evidence: count=0
+  evidence: metric=None
+  evidence: dimensions={}
+```
 
 ## Why This Configuration
 
