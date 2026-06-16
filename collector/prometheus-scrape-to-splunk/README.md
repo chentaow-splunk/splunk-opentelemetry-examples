@@ -86,12 +86,28 @@ receivers:
 * If Collector self-telemetry is enabled, check it for scrape failures before rollout so target reachability issues are not mistaken for Splunk export problems.
 * In Splunk Observability Cloud Metric Finder, search for one metric expected to match the allow-list, such as `http_server_requests_total` or `appliance_requests_total`, and note whether it is absent or missing expected resource dimensions.
 
+Expected baseline result:
+
+```text
+Collector logs: no prometheus/static_targets receiver, or existing scrape failures for the target.
+Metric Finder: target metrics are absent, duplicated by another scraper, or present without deployment.environment/service.namespace.
+Scrape endpoint: curl http://app-1.example.internal:8080/metrics shows metrics such as http_server_requests_total.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and review logs for configuration or startup errors involving `prometheus/static_targets`, `memory_limiter`, `resource/splunk_context`, or the `signalfx` exporter.
 * Watch Collector logs, and self-telemetry when enabled, for scrape failures from the `app-metrics` or `https-appliance` jobs and for exporter send errors.
 * In Metric Finder, search for a metric kept by `metric_relabel_configs` and confirm it appears with the expected environment context, such as `deployment.environment` and `service.namespace=prometheus-scrapes`.
 * In a non-production environment, compare a metric name outside the allow-list with one inside the allow-list. The kept metric should be available for charting, while the intentionally excluded metric should not be newly exported by this Collector configuration.
+
+Expected post-change result:
+
+```text
+Collector logs: prometheus/static_targets starts without scrape manager errors; signalfx exporter reports no send failures.
+Metric Finder: http_server_requests_total or appliance_requests_total appears with deployment.environment and service.namespace=prometheus-scrapes.
+Metric Finder: a metric excluded by metric_relabel_configs does not appear from this Collector instance after the scrape interval and ingest delay.
+```
 
 ## Why This Configuration
 
@@ -124,6 +140,12 @@ Use files or Kubernetes secrets for scrape credentials. Do not put bearer tokens
 Treat scraped labels as customer data until reviewed. Prometheus labels can include hostnames, user identifiers, tenant IDs, and request parameters depending on the exporter.
 
 Keep Collector logs at `info` by default. Use debug logging only for short troubleshooting windows because scrape and OTTL diagnostics can be verbose.
+
+## Configuration Source Basis
+
+This recipe adapts the upstream Prometheus receiver `scrape_configs` model for two common production cases: application `/metrics` endpoints and authenticated HTTPS appliance exporters. The static target, `authorization`, `tls_config`, and `metric_relabel_configs` structure follows Prometheus scrape configuration conventions and the OpenTelemetry Collector Prometheus receiver documentation.
+
+The Splunk exporter and processor chain follows existing backend examples that export metrics through `signalfx` with `memory_limiter`, resource enrichment, and `batch`, including the local VAST Data and GPU metric examples. The allow-list is intentionally illustrative; replace it with metric names from the exporter you actually operate.
 
 ## Official Documentation
 

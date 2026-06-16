@@ -88,6 +88,15 @@ The `$$1` escape is intentional in Collector YAML because `$` is also used for e
 * Check current Collector logs for OTLP receiver or exporter errors before testing transforms.
 * Record any required priority attributes, such as `http.method`, `http.route`, `http.status_code`, `service.name`, `k8s.namespace.name`, or `deployment.environment`, so you can verify they survive the `limit` statements.
 
+Expected baseline result:
+
+```text
+APM: synthetic http.request.header.authorization or http.request.header.cookie attributes are visible when sent.
+APM/logs: synthetic token-like strings are visible in db.statement or log bodies.
+Metric Finder: the test metric still uses the original unnormalized name and high-cardinality attributes such as pod_uid or container_id may be present.
+Collector logs: no transform/normalize processor is active, or existing transform errors are documented before rollout.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration, OTTL parse, or evaluation errors involving `transform/normalize`, plus any exporter errors.
@@ -95,6 +104,23 @@ The `$$1` escape is intentional in Collector YAML because `$` is also used for e
 * In Metric Finder, verify the test metric matching the rename rule appears under the configured normalized name rather than the original name, and that high-cardinality attributes such as `pod_uid` or `container_id` are not present on the exported datapoints.
 * In logs search, verify the synthetic token-like value is masked while unrelated log fields and priority attributes still arrive.
 * Confirm missing resource context is set or upserted as expected, including `deployment.environment` and `service.namespace=normalized-telemetry`.
+
+Expected post-change result:
+
+```text
+Collector logs: no OTTL parse or evaluation errors for transform/normalize.
+APM: http.request.header.authorization and http.request.header.cookie are absent from spans exported by this Collector.
+Logs search: "token=synthetic-token" becomes "token=***" while unrelated log text remains searchable.
+Metric Finder: renamed test metrics and priority dimensions remain; pod_uid/container_id dimensions do not appear from this pipeline.
+```
+
+You can sanity-check the OTTL statements with synthetic records in an OTTL playground such as `https://ottl.run/`. Use non-sensitive samples only. Expected OTTL behavior:
+
+| Statement | Synthetic input | Expected result |
+| --- | --- | --- |
+| `delete_key(span.attributes, "http.request.header.authorization")` | span attribute exists | key is removed. |
+| `replace_pattern(log.body, "(?i)(password|token|api[_-]?key)=([^\\s]+)", "$$1=***") where IsString(log.body)` | `log.body = "login token=synthetic-token"` | `log.body = "login token=***"`. |
+| `limit(datapoint.attributes, 64, ["service.name", "k8s.namespace.name", "k8s.pod.name"])` | datapoint has many attributes | priority attributes are retained while excess attributes can be removed. |
 
 ## Why This Configuration
 
@@ -127,6 +153,12 @@ Use transform rules as a guardrail, not as the only control for secret handling.
 Review regular expressions carefully. Overly broad masking can remove values needed for incident response, while narrow patterns can miss real secrets.
 
 Keep a test payload for each rule in version control or CI so future Collector upgrades do not silently change behavior.
+
+## Configuration Source Basis
+
+This recipe builds on the upstream transform processor and OTTL editor functions for common normalization work: deleting unsafe header attributes, masking known key-value patterns, truncating large values, limiting attribute maps, and normalizing metric names. Those are real-world gateway policies used when telemetry should be retained but reshaped before export.
+
+The exporter and resource-enrichment pattern follows existing local Collector examples in this backend. The actual statements should be treated as a starter policy and validated with synthetic payloads that match the service's real telemetry schema.
 
 ## Official Documentation
 

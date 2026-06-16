@@ -84,12 +84,28 @@ agent:
 * Review existing Collector pod logs for Kubernetes authorization, discovery, scrape, or `signalfx` export errors before changing Helm values.
 * In Splunk Observability Cloud Metric Finder, search for one allowed metric from the workload, such as `http_server_requests_total`, and note whether it is absent, duplicated, or missing expected Kubernetes dimensions.
 
+Expected baseline result:
+
+```text
+kubectl logs: no receiver_creator/prometheus_pods or prometheus/kubernetes_services receiver for the target, or discovery/RBAC errors are visible.
+Metric Finder: selected workload metrics are absent, duplicated by a different scraper, or missing Kubernetes dimensions.
+Kubernetes metadata: pods lack observability.splunk.com/scrape=true, or services lack prometheus.io/scrape=true.
+```
+
 ### After Applying
 
 * After the Helm upgrade, run `kubectl logs` for the agent and cluster receiver pods and check for configuration, RBAC, discovery, scrape, or exporter errors involving `receiver_creator/prometheus_pods`, `prometheus/kubernetes_services`, `k8s_observer`, or `signalfx`.
 * Verify that labelled pods and annotated services are being selected by the intended discovery path. If both pod and service scraping are enabled for the same endpoint, check for duplicate series before rolling out broadly.
 * In Metric Finder, search for a metric allowed by the relevant `metric_relabel_configs` rule and confirm it has the expected Kubernetes and environment context from the chart and resource processors.
 * In a non-production namespace, remove the scrape label or annotation from a test target and confirm future samples from that target stop arriving after the scrape interval and ingest delay.
+
+Expected post-change result:
+
+```text
+kubectl logs: receiver_creator/prometheus_pods and prometheus/kubernetes_services load without discovery or scrape errors.
+Metric Finder: allowed workload metrics arrive with cluster, namespace, pod/service, and environment context.
+Metric Finder: removing the scrape label or annotation from a test target stops new samples from that target after normal scrape and ingest delay.
+```
 
 ## Why This Configuration
 
@@ -122,6 +138,12 @@ Treat Kubernetes labels and annotations as operational control surfaces. Limit w
 Do not put application credentials in service annotations. Use Kubernetes secrets and supported Prometheus authentication settings for authenticated targets.
 
 Keep metric allow-lists reviewed. Kubernetes and application labels can create high-cardinality dimensions quickly.
+
+## Configuration Source Basis
+
+This recipe combines two real-world Kubernetes scrape patterns: pod selection through Collector receiver creation and service selection through Prometheus Kubernetes service discovery. The `kubernetes_sd_configs`, annotation relabeling, and `metric_relabel_configs` blocks follow Prometheus discovery conventions and the OpenTelemetry Collector Prometheus receiver documentation.
+
+The Helm shape follows local Splunk OTel Collector values examples in this backend, where agent and cluster receiver config are extended under chart values. The labels and annotations are deliberately explicit so platform teams can control which workloads become scrape targets.
 
 ## Official Documentation
 

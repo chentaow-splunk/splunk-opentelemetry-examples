@@ -86,6 +86,14 @@ For logs without trace IDs, consider adding a stable log record attribute and co
 * Send synthetic logs with the `sampling.priority` values your policy depends on and confirm how the current pipeline handles them before this processor is introduced.
 * Review current Collector logs for OTLP receiver or exporter errors so missing data is not confused with sampling.
 
+Expected baseline result:
+
+```text
+Source-side test: for example, 1,000 synthetic traces and 1,000 synthetic logs are emitted.
+Splunk APM/logs: retained volume is near the existing baseline, often close to the source-side count if no sampler is already active.
+Collector logs: no probabilistic_sampler/traces or probabilistic_sampler/logs processor is active in these pipelines.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration errors involving `probabilistic_sampler/traces` or `probabilistic_sampler/logs`, plus `otlphttp` or `splunk_hec` exporter errors.
@@ -93,6 +101,16 @@ For logs without trace IDs, consider adding a stable log record attribute and co
 * In Splunk APM, inspect retained traces and confirm expected resource context, including `deployment.environment` and `service.namespace=probabilistic-sampling`, is still present.
 * In logs search, verify synthetic records with `sampling.priority` values behave according to the policy you validated for your deployed Collector version, and that retained logs still contain expected resource context.
 * Confirm dashboards or alert thresholds that depend on sampled data are interpreted using the effective sampling policy.
+
+Expected post-change result:
+
+```text
+Collector logs: probabilistic_sampler/traces and probabilistic_sampler/logs start without configuration errors.
+Splunk APM/logs: over a large non-production sample, retained telemetry is roughly consistent with sampling_percentage=20.
+Splunk APM/logs: retained telemetry still includes deployment.environment and service.namespace=probabilistic-sampling.
+```
+
+Do not validate this with a tiny sample. With percentage-based sampling, small batches can vary substantially from the configured percentage.
 
 ## Why This Configuration
 
@@ -125,6 +143,12 @@ Sampling drops data. Make sure retention requirements, audit expectations, and i
 Do not use sampling as redaction. Sensitive fields in retained telemetry still require redaction or transform rules.
 
 Record the effective sampling policy in service runbooks so dashboards and alert thresholds are interpreted correctly.
+
+## Configuration Source Basis
+
+This recipe is derived from the upstream probabilistic sampler processor behavior for stateless percentage-based reduction of spans and logs. The real-world scenario is cost and volume control for high-throughput services where retaining every ordinary request or log line is not operationally necessary.
+
+The recipe deliberately excludes metrics because the referenced processor is documented for traces and logs. Use metric aggregation, scrape-time relabeling, or receiver-specific controls for metric volume instead.
 
 ## Official Documentation
 

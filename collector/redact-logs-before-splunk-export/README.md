@@ -82,6 +82,14 @@ processors:
 * Review current Collector logs for OTLP receiver or `splunk_hec` exporter errors before testing redaction behavior.
 * Record unrelated log fields that must remain available for search and incident review.
 
+Expected baseline result:
+
+```text
+Logs search: "login token=synthetic-token" is visible when sent through the current pipeline.
+Logs search: structured fields such as password=synthetic-password or attributes such as authorization=Bearer synthetic-token are visible if the source emits them.
+Collector logs: no transform/log_string_redaction or redaction/log_maps_and_attributes processor is active, or existing OTLP/HEC errors are documented before rollout.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration, OTTL parse, or evaluation errors involving `transform/log_string_redaction`, and for processor errors involving `redaction/log_maps_and_attributes`.
@@ -89,6 +97,21 @@ processors:
 * Re-send the synthetic logs. In Splunk logs search, verify the plain string token-like value and card-like test values are masked by the transform processor.
 * Verify structured body fields and log attributes that match the blocked key or value patterns are masked or removed before export, while unrelated log fields still arrive with expected resource context such as `service.namespace=redacted-logs`.
 * While `summary: info` is enabled, use redaction summary attributes as supporting evidence during validation, then reduce summary verbosity if it is too noisy for production.
+
+Expected post-change result:
+
+```text
+Collector logs: transform/log_string_redaction has no OTTL parse errors and splunk_hec has no send failures.
+Logs search: "login token=synthetic-token" becomes "login token=***".
+Logs search: synthetic card-like values matching the configured patterns become "****".
+Logs search: structured body fields or attributes matching blocked key/value patterns are masked or removed; unrelated fields remain searchable.
+```
+
+You can sanity-check the string-body OTTL statement with a synthetic log record in an OTTL playground such as `https://ottl.run/`. Expected OTTL behavior:
+
+| Statement | Synthetic input | Expected result |
+| --- | --- | --- |
+| `replace_pattern(log.body, "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)", "$$1=***") where IsString(log.body)` | `log.body = "login token=synthetic-token"` | `log.body = "login token=***"`. |
 
 ## Why This Configuration
 
@@ -121,6 +144,12 @@ Do not test with real secrets or real payment data. Use synthetic examples that 
 Masking credit-card-like patterns can produce false positives. Review both misses and over-masking with the application team.
 
 Redaction does not replace Splunk access controls, index controls, or retention policy.
+
+## Configuration Source Basis
+
+This recipe combines two documented processors for a common log problem: plain string bodies require OTTL string replacement through the transform processor, while structured log body maps and log attributes can use the redaction processor's blocked key and blocked value behavior.
+
+The redaction portion is based on the upstream redaction processor README, including `redact_all_types`, blocked key/value patterns, and summary audit attributes. The logs-only exporter pattern follows local Collector log examples that send logs through `splunk_hec`.
 
 ## Official Documentation
 

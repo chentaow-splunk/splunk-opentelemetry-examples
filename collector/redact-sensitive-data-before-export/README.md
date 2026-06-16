@@ -88,12 +88,32 @@ processors:
 * Review current Collector logs for OTLP receiver or exporter errors so missing telemetry is not mistaken for successful redaction.
 * Record unrelated attributes and fields that must remain visible after redaction.
 
+Expected baseline result:
+
+```text
+APM: synthetic api_key or authorization-like span attributes are visible if the current pipeline forwards them.
+Metric Finder: a synthetic token-like datapoint attribute is visible if the source emits it.
+Logs search: a structured body map field such as password=synthetic-password is visible if the current pipeline forwards structured log bodies.
+Collector logs: no redaction/sensitive processor is active, or existing processor/exporter errors are documented before rollout.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration or processor errors involving `redaction/sensitive`, plus `otlphttp`, `signalfx`, or `splunk_hec` exporter errors.
 * Re-send the synthetic test telemetry. In Splunk APM, Metric Finder, and logs search, verify blocked keys or blocked values are masked or removed before export according to the redaction policy.
 * Confirm unrelated attributes and fields still arrive with expected resource context, including `deployment.environment` and `service.namespace=redacted-telemetry`.
 * While `summary: info` is enabled, use the redaction summary attributes as supporting evidence that the processor matched test records. Do not leave verbose summaries enabled if they are too noisy for production.
+
+Expected post-change result:
+
+```text
+Collector logs: redaction/sensitive starts without configuration errors.
+APM/Metric Finder/logs: attributes whose keys match password, token, api_key, authorization, or cookie are masked or removed before export.
+APM/Metric Finder/logs: synthetic card-like values matching the configured blocked_values are masked.
+APM/Metric Finder/logs: redaction.masked.count or redaction.redacted.count appears while summary: info is enabled when the processor changes a record.
+```
+
+This expected result is based on the upstream redaction processor README, which documents `allow_all_keys`, `blocked_key_patterns`, `blocked_values`, `redact_all_types`, and summary audit attributes such as `redaction.masked.count` and `redaction.redacted.count`.
 
 ## Why This Configuration
 
@@ -126,6 +146,12 @@ Never validate with real secrets. Use synthetic values that resemble the pattern
 Keep redaction rules under review by security and service owners. Telemetry schemas change over time.
 
 Redaction does not change retention policy or access control in Splunk. Apply Splunk-side permissions and retention controls separately.
+
+## Configuration Source Basis
+
+This recipe starts from the upstream redaction processor README and adapts it to a Splunk export pipeline. The upstream processor documentation calls out sensitive-field leakage, privacy requirements, and payment-card-like values as typical use cases, and it documents how blocked keys, blocked values, all-type redaction, and summary audit attributes behave.
+
+The scenario is a realistic pre-export control for platform teams that need to reduce accidental leakage in traces, metric datapoint attributes, and structured log records. It is not a compliance guarantee; it is one Collector control that must be paired with source-side data minimization and Splunk-side access controls.
 
 ## Official Documentation
 

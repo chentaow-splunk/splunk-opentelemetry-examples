@@ -85,12 +85,38 @@ processors:
 * Before enabling `filter/noise`, use Splunk APM, Metric Finder, and logs search to confirm both noisy and retained examples can be observed. This establishes that later absence is caused by the filter, not by missing instrumentation.
 * Review the current Collector logs for OTLP receiver, processor, or exporter errors so existing ingestion problems are separated from filter behavior.
 
+Expected baseline result:
+
+```text
+APM: a span named GET /health or GET /ready is visible.
+Metric Finder: go_*, process_*, or promhttp_* metrics are visible when sent by the source.
+Logs search: DEBUG/INFO health-check logs are visible alongside WARN/ERROR application logs.
+Collector logs: no filter/noise processor is active for these pipelines.
+```
+
 ### After Applying
 
 * Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration, OTTL parse, or evaluation errors involving `filter/noise`. Also check for `otlphttp`, `signalfx`, or `splunk_hec` exporter errors.
 * Re-send the same dropped and retained test telemetry. In Splunk APM, health-check spans should be absent while retained error or non-health spans remain visible.
 * In Metric Finder, verify metrics matching the configured noisy names or route attributes are not newly exported, while retained service metrics still arrive with expected resource context.
 * In logs search, verify low-severity or health-check logs are absent and warning or error logs from the same test source still arrive.
+
+Expected post-change result:
+
+```text
+Collector logs: no OTTL parse errors for filter/noise.
+APM: GET /health or GET /ready spans sent through this Collector are absent; retained non-health or error spans remain visible.
+Metric Finder: go_*, process_*, and promhttp_* series are not newly exported by this Collector; allowed service metrics still arrive.
+Logs search: low-severity health-check logs are absent; WARN/ERROR logs from the same source remain visible.
+```
+
+You can sanity-check the OTTL conditions with synthetic records in an OTTL playground such as `https://ottl.run/`. Use non-sensitive samples only. Expected OTTL behavior:
+
+| Condition | Synthetic input | Expected result |
+| --- | --- | --- |
+| `IsMatch(span.name, ".*/(health|ready|live|metrics).*")` | `span.name = "GET /health"` | `true`, record is dropped. |
+| `IsMatch(metric.name, "^(go_|process_|promhttp_).*")` | `metric.name = "process_cpu_seconds_total"` | `true`, metric is dropped. |
+| `log.severity_number < SEVERITY_NUMBER_WARN` | `log.severity_number = SEVERITY_NUMBER_INFO` | `true`, log is dropped. |
 
 ## Why This Configuration
 
@@ -123,6 +149,12 @@ Treat filter rules as production controls. A bad rule can hide outages, failed a
 Keep the configuration in source control and require review from service owners for route, status, and severity based drops.
 
 Do not use filters to redact secrets. Use the redaction or transform recipes when data must be retained but masked.
+
+## Configuration Source Basis
+
+This recipe is based on the upstream filter processor model where matching OTTL conditions drop telemetry by signal. The local Cisco AI Ready Pods examples already use filter processors for health and metric-selection patterns; this cookbook generalizes that operational pattern to common application telemetry noise.
+
+The examples intentionally use simple span-name, metric-name, datapoint-attribute, and severity predicates. They are realistic production controls, but each rule must be reviewed against the source telemetry schema before rollout because filtering removes data.
 
 ## Official Documentation
 

@@ -87,6 +87,14 @@ processors:
 * In Splunk APM, note the current retention behavior for those traces before `tail_sampling/error_and_latency` is enabled. If SDK or upstream sampling already drops traces, document that baseline.
 * Review current gateway logs for OTLP receiver or `otlphttp` exporter errors before enabling tail sampling.
 
+Expected baseline result:
+
+```text
+Gateway topology: all spans for a trace are routed to one gateway instance, or the validation is blocked until trace affinity is fixed.
+Splunk APM: error, slow, and ordinary successful traces follow the current sampling policy, which may drop important traces if no tail sampler is active.
+Collector logs: no tail_sampling/error_and_latency processor is active, and existing OTLP/export errors are documented before rollout.
+```
+
 ### After Applying
 
 * Start the gateway Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration errors involving `tail_sampling/error_and_latency`, memory pressure, dropped traces, or `otlphttp` exporter errors.
@@ -94,6 +102,15 @@ processors:
 * Re-run the ordinary successful request batch and compare retained traces with the source-side count. The retained volume should be broadly consistent with the baseline probabilistic policy over a large enough sample.
 * Inspect retained traces in APM for expected resource context, including `deployment.environment` and `service.namespace=tail-sampling`.
 * If traces are incomplete or policy results look inconsistent, check gateway load balancing for span fan-out before changing sampling thresholds.
+
+Expected post-change result:
+
+```text
+Collector logs: tail_sampling/error_and_latency starts without configuration errors and memory pressure is within gateway limits.
+Splunk APM: synthetic ERROR traces are retained.
+Splunk APM: synthetic traces slower than 1000 ms are retained.
+Splunk APM: ordinary successful traces are retained at roughly the baseline probabilistic policy over a large sample.
+```
 
 ## Why This Configuration
 
@@ -126,6 +143,12 @@ Tail sampling changes observability completeness. Document that ordinary success
 Do not route regulated data to a gateway solely because it samples. Sampling does not redact retained spans.
 
 Keep emergency procedures for temporarily increasing sampling during incidents.
+
+## Configuration Source Basis
+
+This recipe follows the upstream tail sampling processor policy model for whole-trace decisions after spans have been buffered. The error, latency, and baseline probabilistic policies are common gateway-side production controls: keep high-value traces, keep slow traces for performance analysis, and retain a small ordinary baseline.
+
+The topology warning comes directly from the tail-sampling requirement that all spans for a trace must reach the same Collector instance. Without that, expected before/after results are not meaningful.
 
 ## Official Documentation
 
