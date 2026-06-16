@@ -118,6 +118,24 @@ You can sanity-check the OTTL conditions with synthetic records in an OTTL playg
 | `IsMatch(metric.name, "^(go_|process_|promhttp_).*")` | `metric.name = "process_cpu_seconds_total"` | `true`, metric is dropped. |
 | `log.severity_number < SEVERITY_NUMBER_WARN` | `log.severity_number = SEVERITY_NUMBER_INFO` | `true`, log is dropped. |
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces, metrics, and logs, and the Collector `debug` exporter. This validates local Collector filter behavior before any Splunk export.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic batch included GET /health, process_cpu_seconds_total, healthcheck ok, GET /checkout, checkout_requests_total, and checkout failed.
+```
+
+Observed after:
+
+```text
+debug exporter output retained GET /checkout, checkout_requests_total, and checkout failed; dropped the noisy samples.
+```
+
 ## Why This Configuration
 
 `error_mode: ignore` keeps valid telemetry flowing if a condition cannot evaluate on a particular record. The filter processor is placed early, after `memory_limiter`, so dropped telemetry does not consume later processor and exporter capacity.

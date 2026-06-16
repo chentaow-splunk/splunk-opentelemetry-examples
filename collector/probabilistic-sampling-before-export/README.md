@@ -112,6 +112,24 @@ Splunk APM/logs: retained telemetry still includes deployment.environment and se
 
 Do not validate this with a tiny sample. With percentage-based sampling, small batches can vary substantially from the configured percentage.
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, 100 synthetic OTLP log records, and the Collector `debug` exporter. This validates local probabilistic sampler behavior before any Splunk export.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic source sent 100 log records.
+```
+
+Observed after:
+
+```text
+debug exporter output retained 36 unique records, consistent with percentage sampling over a small local test.
+```
+
 ## Why This Configuration
 
 The trace sampler uses `mode: proportional` for predictable ratio-based trace reduction. The log sampler keeps `fail_closed: false` so logs without sampling randomness are not dropped unexpectedly during initial rollout.

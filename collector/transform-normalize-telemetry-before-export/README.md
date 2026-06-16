@@ -122,6 +122,24 @@ You can sanity-check the OTTL statements with synthetic records in an OTTL playg
 | `replace_pattern(log.body, "(?i)(password|token|api[_-]?key)=([^\\s]+)", "$$1=***") where IsString(log.body)` | `log.body = "login token=synthetic-token"` | `log.body = "login token=***"`. |
 | `limit(datapoint.attributes, 64, ["service.name", "k8s.namespace.name", "k8s.pod.name"])` | datapoint has many attributes | priority attributes are retained while excess attributes can be removed. |
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces and logs, and the Collector `debug` exporter. This validates local transform processor behavior before any Splunk export.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic span/log contained Bearer synthetic-token, session=synthetic, password='synthetic-secret', and login token=synthetic-token.
+```
+
+Observed after:
+
+```text
+debug exporter output contained password='***' and login token=***; removed authorization/cookie attributes and raw secret values.
+```
+
 ## Why This Configuration
 
 The transform processor is useful when the telemetry should remain available but needs shape changes before export. `delete_key`, `replace_pattern`, `truncate_all`, and `limit` are documented OTTL editor functions and are scoped to signal-specific contexts.

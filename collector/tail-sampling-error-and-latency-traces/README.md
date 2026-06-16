@@ -112,6 +112,24 @@ Splunk APM: synthetic traces slower than 1000 ms are retained.
 Splunk APM: ordinary successful traces are retained at roughly the baseline probabilistic policy over a large sample.
 ```
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces, and the Collector `debug` exporter. The local validation sets the baseline probabilistic policy to 0 percent so the ordinary trace drop is deterministic.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic batch included GET /error, GET /slow, and GET /ordinary.
+```
+
+Observed after:
+
+```text
+debug exporter output retained GET /error and GET /slow; dropped GET /ordinary with baseline sampling set to 0 for deterministic validation.
+```
+
 ## Why This Configuration
 
 The `status_code` policy keeps error traces. The `latency` policy keeps slow traces. The probabilistic policy keeps a baseline sample of ordinary traces so service maps and latency trends still have data.

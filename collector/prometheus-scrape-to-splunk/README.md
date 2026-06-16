@@ -109,6 +109,24 @@ Metric Finder: http_server_requests_total or appliance_requests_total appears wi
 Metric Finder: a metric excluded by metric_relabel_configs does not appear from this Collector instance after the scrape interval and ingest delay.
 ```
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic Prometheus endpoint, and the Collector `debug` exporter. This validates the Collector scrape, relabel, processor, and export path locally; it does not prove connectivity to a live Splunk tenant.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic endpoint exposed http_server_requests_total and promhttp_metric_handler_requests_total.
+```
+
+Observed after:
+
+```text
+debug exporter output contained http_server_requests_total with deployment.environment=validation; excluded promhttp_metric_handler_requests_total was not exported.
+```
+
 ## Why This Configuration
 
 The `prometheus` receiver keeps scrape configuration close to Prometheus conventions, including static targets, HTTPS settings, authentication, and relabeling. The `metric_relabel_configs` block reduces volume before export rather than sending unwanted series to Splunk.

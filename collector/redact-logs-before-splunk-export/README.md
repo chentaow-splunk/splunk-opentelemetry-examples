@@ -113,6 +113,24 @@ You can sanity-check the string-body OTTL statement with a synthetic log record 
 | --- | --- | --- |
 | `replace_pattern(log.body, "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)", "$$1=***") where IsString(log.body)` | `log.body = "login token=synthetic-token"` | `log.body = "login token=***"`. |
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic OTLP log record, and the Collector `debug` exporter. This validates local transform and redaction processor behavior before any Splunk export.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic log body contained token=synthetic-token and card=4111111111111111; attributes included authorization=Bearer synthetic-token and safe.field=keep-me.
+```
+
+Observed after:
+
+```text
+debug exporter output contained login **** card=****, retained safe.field=keep-me, and included redaction.masked.count.
+```
+
 ## Why This Configuration
 
 Plain string log bodies and structured log records need different handling. `replace_pattern(log.body, ...)` is explicit for string bodies. The redaction processor is then used for attributes and structured maps where it has documented support.

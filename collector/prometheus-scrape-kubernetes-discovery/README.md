@@ -107,6 +107,24 @@ Metric Finder: allowed workload metrics arrive with cluster, namespace, pod/serv
 Metric Finder: removing the scrape label or annotation from a test target stops new samples from that target after normal scrape and ingest delay.
 ```
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic Prometheus endpoint, and the Collector `debug` exporter. The local run validates the scrape, relabel, processor, and export behavior with a static target equivalent; Kubernetes API discovery still requires cluster validation.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic endpoint exposed an application metric and a runtime metric.
+```
+
+Observed after:
+
+```text
+debug exporter output contained the application metric and excluded the runtime metric by relabel rule.
+```
+
 ## Why This Configuration
 
 The recipe separates pod and service discovery because their ownership models differ. Pod scraping is node-local and label-driven. Service scraping uses Prometheus Kubernetes service discovery and standard Prometheus relabeling.

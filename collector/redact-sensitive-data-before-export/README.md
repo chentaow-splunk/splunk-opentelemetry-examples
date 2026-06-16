@@ -115,6 +115,24 @@ APM/Metric Finder/logs: redaction.masked.count or redaction.redacted.count appea
 
 This expected result is based on the upstream redaction processor README, which documents `allow_all_keys`, `blocked_key_patterns`, `blocked_values`, `redact_all_types`, and summary audit attributes such as `redaction.masked.count` and `redaction.redacted.count`.
 
+### Live Local Validation Result
+
+Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces and logs, and the Collector `debug` exporter. This validates local redaction processor behavior before any Splunk export.
+
+Status: `PASS`
+
+Observed before:
+
+```text
+Synthetic span/log carried api_key=synthetic-api-key, card=4111111111111111, and password=synthetic-password.
+```
+
+Observed after:
+
+```text
+debug exporter output removed raw sensitive values, retained customer.id/message, and included redaction.masked.count audit evidence.
+```
+
 ## Why This Configuration
 
 The redaction processor is purpose-built for sensitive attribute handling. `blocked_key_patterns` catches known risky keys, while `blocked_values` catches sensitive-looking values that appear under otherwise allowed keys.
