@@ -2,67 +2,99 @@
 
 ## Scenario
 
-Use this recipe when you need to keep complete traces for errors and slow requests while sampling ordinary successful traces before export to Splunk APM.
+You already have a Collector gateway receiving OTLP traces from applications, agents, or SDKs. In this scenario, you will add tail sampling so complete error traces and slow traces are retained while ordinary successful traces are sampled before export to Splunk APM.
 
-Tail sampling fits gateway deployments where all spans for a trace can reach the same Collector instance. Do not use this recipe on independent node agents unless trace affinity is guaranteed; partial traces lead to poor sampling decisions.
+Use this for gateway deployments where all spans for a trace can reach the same Collector instance. Do not use this on independent node agents unless trace affinity is guaranteed; partial traces produce poor sampling decisions.
+
+What you should capture before changing the Collector:
+
+| Trace type | Example before this config | What you see |
+| --- | --- | --- |
+| Error trace | Trace with status `ERROR` | Exported only if your current pipeline exports all traces or samples it elsewhere. |
+| Slow trace | Trace with duration greater than the configured threshold | Not specially retained by the Collector. |
+| Normal success trace | High-volume successful request traces | Exported in full if no sampling exists. |
 
 ## Architecture Overview
 
 ```text
 instrumented services
-  -> OTLP traces
-  -> Collector gateway with trace affinity
-  -> resourcedetection and Splunk context attributes
-  -> tail_sampling policies
+  -> existing Collector gateway OTLP receiver
+  -> resource detection and Splunk context
+  -> tail_sampling/error_and_latency
   -> batch
-  -> Splunk APM ingest
+  -> Splunk APM OTLP ingest
 ```
 
-The tail sampling processor buffers spans by trace ID, waits for enough of the trace to arrive, and then applies policies for errors, latency, and baseline probabilistic sampling.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk Observability Cloud access token and ingest URL.
-* A Collector build that includes the `tail_sampling` processor.
-* A gateway topology or load-balancing strategy that sends all spans for the same trace to the same Collector instance.
-* Enough Collector memory for `decision_wait`, `num_traces`, and traffic rate.
-* A tested threshold for slow traces. The example uses `1000` milliseconds as a placeholder, not a universal recommendation.
+* An existing Collector gateway that receives complete traces or has load balancing with trace affinity.
+* Working trace export to Splunk APM.
+* Access to edit the gateway Collector configuration and restart or roll out the gateway safely.
+* A memory budget for `decision_wait`, `num_traces`, and expected trace rate.
+* An approved latency threshold; the example uses `1000` ms as a placeholder to demonstrate the policy.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Deploy the Collector as a gateway receiving OTLP traffic from agents or SDKs.
-2. Copy [otelcol.yaml](./otelcol.yaml) to the gateway.
+1. Download or copy `otelcol.yaml` and compare it with your current gateway config.
+2. Copy `tail_sampling/error_and_latency` into your existing `processors` block.
 3. Tune `decision_wait`, `num_traces`, `expected_new_traces_per_sec`, and policy thresholds for your traffic.
-4. Export Splunk settings:
+4. Place tail sampling after resource/context processors and before `batch` in the traces pipeline.
+5. Restart or roll out the gateway and send a mix of successful, error, and slow test traces.
 
-   ```bash
-   export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-5. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 4317:4317 \
-     -p 4318:4318 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_ACCESS_TOKEN \
-     -e SPLUNK_INGEST_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml). The policy set is:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
 processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 1024
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: tail-sampling
   tail_sampling/error_and_latency:
     decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 500
+    decision_cache:
+      sampled_cache_size: 100000
+      non_sampled_cache_size: 100000
     policies:
       - name: keep-error-traces
         type: status_code
@@ -76,111 +108,84 @@ processors:
         type: probabilistic
         probabilistic:
           sampling_percentage: 10
+  batch: {}
+
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource/splunk_context, tail_sampling/error_and_latency, batch]
+      exporters: [otlphttp]
 ```
 
 ## Validation
 
 ### Before Applying
 
-* Confirm the gateway topology can route all spans for a trace to the same Collector instance. If trace affinity is not in place, fix that before validating tail sampling.
-* Generate a non-production error request, a request slower than the planned threshold, and a larger batch of ordinary successful requests. Record the source-side trace IDs or request IDs where your instrumentation makes that possible.
-* In Splunk APM, note the current retention behavior for those traces before `tail_sampling/error_and_latency` is enabled. If SDK or upstream sampling already drops traces, document that baseline.
-* Review current gateway logs for OTLP receiver or `otlphttp` exporter errors before enabling tail sampling.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-Gateway topology: all spans for a trace are routed to one gateway instance, or the validation is blocked until trace affinity is fixed.
-Splunk APM: error, slow, and ordinary successful traces follow the current sampling policy, which may drop important traces if no tail sampler is active.
-Collector logs: no tail_sampling/error_and_latency processor is active, and existing OTLP/export errors are documented before rollout.
-```
+| Trace type | Example before this config | What you see |
+| --- | --- | --- |
+| Error trace | Trace with status `ERROR` | Exported only if your current pipeline exports all traces or samples it elsewhere. |
+| Slow trace | Trace with duration greater than the configured threshold | Not specially retained by the Collector. |
+| Normal success trace | High-volume successful request traces | Exported in full if no sampling exists. |
 
 ### After Applying
 
-* Start the gateway Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration errors involving `tail_sampling/error_and_latency`, memory pressure, dropped traces, or `otlphttp` exporter errors.
-* Re-run the error and slow request tests, then wait longer than `decision_wait` plus normal ingest delay before checking Splunk APM. The error and slow traces should be retained as complete traces when all spans reach the same gateway instance.
-* Re-run the ordinary successful request batch and compare retained traces with the source-side count. The retained volume should be broadly consistent with the baseline probabilistic policy over a large enough sample.
-* Inspect retained traces in APM for expected resource context, including `deployment.environment` and `service.namespace=tail-sampling`.
-* If traces are incomplete or policy results look inconsistent, check gateway load balancing for span fan-out before changing sampling thresholds.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
+| Trace type | Expected after applying this config | Validation target |
+| --- | --- | --- |
+| Error trace | Complete error traces are retained by `keep-error-traces`. | Error traces are visible in APM. |
+| Slow trace | Traces above `threshold_ms: 1000` are retained by `keep-slow-traces`. | Slow operation traces are visible in APM. |
+| Normal success trace | Only a baseline percentage is retained by the probabilistic policy. | Successful trace count drops while service visibility remains. |
 
-```text
-Collector logs: tail_sampling/error_and_latency starts without configuration errors and memory pressure is within gateway limits.
-Splunk APM: synthetic ERROR traces are retained.
-Splunk APM: synthetic traces slower than 1000 ms are retained.
-Splunk APM: ordinary successful traces are retained at roughly the baseline probabilistic policy over a large sample.
-```
-
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces, and the Collector `debug` exporter. The local validation sets the baseline probabilistic policy to 0 percent so the ordinary trace drop is deterministic.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic batch included GET /error, GET /slow, and GET /ordinary.
-```
-
-Observed after:
-
-```text
-debug exporter output retained GET /error and GET /slow; dropped GET /ordinary with baseline sampling set to 0 for deterministic validation.
-```
-
-### Splunk Backend Payload Validation Status
-
-Checked with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The local Collector payload validation passed, but backend payload validation for this signal was not performed in this environment.
-
-```text
-Not performed.
-This cookbook processes traces. The available API token validates metrics through SignalFlow and metric time-series metadata, but this harness does not have a verified Splunk APM trace-search API path for span-level backend assertions.
-The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.
-Backend validation is required; local health alone does not prove ingestion.
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-The `status_code` policy keeps error traces. The `latency` policy keeps slow traces. The probabilistic policy keeps a baseline sample of ordinary traces so service maps and latency trends still have data.
-
-Resource enrichment runs before tail sampling so policy decisions can use resource context later if you add attribute-based policies. `batch` runs after tail sampling because the processor reassembles spans into new batches.
+Tail sampling waits for enough spans to make a policy decision for the whole trace. This is more useful than probabilistic sampling when errors and latency matter, but it requires memory and trace affinity.
 
 ## Troubleshooting
 
-If error traces are incomplete, verify trace affinity across gateways and confirm all services propagate trace context.
-
-If memory usage is high, reduce `decision_wait`, tune `num_traces`, or scale gateway capacity with trace-aware routing.
-
-If slow traces are not retained, confirm the threshold is lower than the trace duration and that all spans reached the same processor instance.
-
-If ordinary traces are over-retained, review policy interaction. Tail sampling samples a trace when any sample policy matches and no drop policy overrides it.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Error traces are missing | Check whether all spans for a trace reach the same gateway instance. | Use trace-aware load balancing or route SDKs/agents consistently. |
+| Gateway memory grows | Review `num_traces`, `decision_wait`, and incoming trace rate. | Increase resources or reduce decision windows and retained trace count. |
+| Too many normal traces remain | Check the baseline probabilistic policy. | Lower `sampling_percentage` after validating error/latency retention. |
 
 ## Scaling Recommendations
 
-Run tail sampling in a gateway tier with enough memory headroom. It buffers traces, so capacity planning must account for request rate and `decision_wait`.
-
-Use trace-aware load balancing before multiple tail-sampling gateway replicas. The processor documentation states that all spans for a trace must reach the same Collector instance for effective decisions.
-
-Start with conservative thresholds and monitor retained trace volume before lowering baseline sampling.
+* Use gateway replicas with trace affinity for high-volume environments.
+* Size memory for buffered traces before enabling high `num_traces` values.
+* Monitor Collector refused/dropped spans and exporter queue metrics during rollout.
 
 ## Security and Operations Notes
 
-Tail sampling changes observability completeness. Document that ordinary successful traces may be absent by design.
-
-Do not route regulated data to a gateway solely because it samples. Sampling does not redact retained spans.
-
-Keep emergency procedures for temporarily increasing sampling during incidents.
+* Sampling does not redact data; sensitive attributes in retained traces are still exported.
+* Keep access tokens in your secret manager.
+* Document sampling policies so incident responders understand retained and dropped trace classes.
 
 ## Configuration Source Basis
 
-This recipe follows the upstream tail sampling processor policy model for whole-trace decisions after spans have been buffered. The error, latency, and baseline probabilistic policies are common gateway-side production controls: keep high-value traces, keep slow traces for performance analysis, and retain a small ordinary baseline.
-
-The topology warning comes directly from the tail-sampling requirement that all spans for a trace must reach the same Collector instance. Without that, expected before/after results are not meaningful.
+This cookbook adapts the local `otelcol.yaml` example and the OpenTelemetry tail sampling processor pattern for an existing Splunk APM Collector gateway.
 
 ## Official Documentation
 
-* [Splunk tail sampling processor](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/processors/tail-sampling-processor)
-* [OpenTelemetry Collector tail sampling processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/tailsamplingprocessor)
-* [OpenTelemetry sampling concepts](https://opentelemetry.io/docs/concepts/sampling/)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/tailsamplingprocessor

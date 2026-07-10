@@ -2,187 +2,194 @@
 
 ## Scenario
 
-Use this recipe when application logs can contain passwords, tokens, API keys, cookies, authorization headers, or credit-card-like values and must be cleaned before Splunk HEC export.
+You already have a Collector receiving logs and exporting them to Splunk through HEC. In this scenario, you will add log redaction processors before the HEC exporter so synthetic secret-like values are masked before export.
 
-The recipe combines transform-based masking for plain string log bodies with the redaction processor for log attributes and structured log body maps. Do not use it as the only control for sensitive logging; fix producers so they avoid writing secrets.
+Use this when logs can include passwords, tokens, API keys, cookies, authorization headers, or credit-card-like values. Do not use this as the only control; application teams should still avoid writing secrets to logs.
+
+What you should capture before changing the Collector:
+
+| Log shape | Example before this config | Risk |
+| --- | --- | --- |
+| Plain text body | `login token=synthetic-token user=demo` | Synthetic token-like value appears in log search. |
+| Structured body map | `{ "password": "synthetic-password" }` | Secret-like key/value can be exported. |
+| Attributes | `authorization=Bearer synthetic-token` | Sensitive header value can be exported. |
 
 ## Architecture Overview
 
 ```text
-applications or agents
-  -> OTLP logs
-  -> transform processor for plain string bodies
-  -> redaction processor for attributes and structured body maps
-  -> resourcedetection and Splunk context attributes
-  -> splunk_hec exporter
-  -> Splunk log ingest
+applications or log agents
+  -> existing Collector OTLP logs receiver
+  -> transform/log_string_redaction for string bodies
+  -> redaction/log_maps_and_attributes for attributes and structured maps
+  -> Splunk HEC exporter
 ```
 
-The transform processor handles string bodies because it can apply `replace_pattern` directly to `log.body`. The redaction processor handles log attributes and documented structured log body map behavior.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk HEC token and HEC URL, for example `https://ingest.<realm>.observability.splunkcloud.com/v1/log`.
-* A Collector build that includes the `transform` and `redaction` processors plus the `splunk_hec` exporter.
-* A reviewed list of blocked log key patterns and value patterns.
-* Synthetic test logs for plain text bodies, structured bodies, and log attributes.
-* Agreement on redaction summaries. `summary: info` helps validation but can add diagnostic attributes.
+* An existing Collector deployment that already receives logs.
+* A working Splunk HEC exporter configuration and HEC token managed outside the config file.
+* Access to edit the Collector configuration and restart or roll out the Collector safely.
+* A reviewed list of blocked keys and value patterns.
+* Synthetic test logs only; do not test with real secrets.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Copy [otelcol.yaml](./otelcol.yaml) to the Collector host or gateway.
-2. Replace the regex patterns with your approved policy.
-3. Export Splunk settings:
+1. Download or copy `otelcol.yaml` and compare it with your current logs pipeline.
+2. Copy `transform/log_string_redaction` and `redaction/log_maps_and_attributes` into your existing `processors` block.
+3. Place the processors after `memory_limiter` and before enrichment/export processors in the logs pipeline.
+4. Replace regexes with your approved policy and keep synthetic examples in tests.
+5. Restart or roll out the Collector and send synthetic logs through the same path as application logs.
 
-   ```bash
-   export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-4. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 4317:4317 \
-     -p 4318:4318 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_HEC_TOKEN \
-     -e SPLUNK_HEC_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml). The logs-only processor chain is:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
 processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
   transform/log_string_redaction:
     error_mode: ignore
     log_statements:
       - 'replace_pattern(log.body, "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)", "$$1=***") where IsString(log.body)'
+      - 'replace_pattern(log.body, "\\b4[0-9]{12}(?:[0-9]{3})?\\b", "****") where IsString(log.body)'
+      - 'replace_pattern(log.body, "\\b5[1-5][0-9]{14}\\b", "****") where IsString(log.body)'
   redaction/log_maps_and_attributes:
     allow_all_keys: true
     redact_all_types: true
     blocked_key_patterns:
+      - "(?i).*password.*"
+      - "(?i).*passwd.*"
+      - "(?i).*secret.*"
+      - "(?i).*token.*"
+      - "(?i).*api[_-]?key.*"
       - "(?i).*authorization.*"
       - "(?i).*cookie.*"
+    blocked_values:
+      - "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)"
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+      - "\\b5[1-5][0-9]{14}\\b"
     summary: info
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: redacted-logs
+  batch: {}
+
+exporters:
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/log_string_redaction, redaction/log_maps_and_attributes, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]
 ```
 
 ## Validation
 
 ### Before Applying
 
-* Use only synthetic sensitive values. In a non-production environment, send a plain text log such as `login token=synthetic-token`, a structured log body map with a synthetic password field, and log attributes containing synthetic `authorization` or `cookie` values.
-* Before enabling this logs pipeline, use Splunk logs search to confirm whether those synthetic values are visible in the current pipeline.
-* Review current Collector logs for OTLP receiver or `splunk_hec` exporter errors before testing redaction behavior.
-* Record unrelated log fields that must remain available for search and incident review.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-Logs search: "login token=synthetic-token" is visible when sent through the current pipeline.
-Logs search: structured fields such as password=synthetic-password or attributes such as authorization=Bearer synthetic-token are visible if the source emits them.
-Collector logs: no transform/log_string_redaction or redaction/log_maps_and_attributes processor is active, or existing OTLP/HEC errors are documented before rollout.
-```
+| Log shape | Example before this config | Risk |
+| --- | --- | --- |
+| Plain text body | `login token=synthetic-token user=demo` | Synthetic token-like value appears in log search. |
+| Structured body map | `{ "password": "synthetic-password" }` | Secret-like key/value can be exported. |
+| Attributes | `authorization=Bearer synthetic-token` | Sensitive header value can be exported. |
 
 ### After Applying
 
-* Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration, OTTL parse, or evaluation errors involving `transform/log_string_redaction`, and for processor errors involving `redaction/log_maps_and_attributes`.
-* Check Collector logs for `splunk_hec` exporter errors before using the Splunk UI result as proof.
-* Re-send the synthetic logs. In Splunk logs search, verify the plain string token-like value and card-like test values are masked by the transform processor.
-* Verify structured body fields and log attributes that match the blocked key or value patterns are masked or removed before export, while unrelated log fields still arrive with expected resource context such as `service.namespace=redacted-logs`.
-* While `summary: info` is enabled, use redaction summary attributes as supporting evidence during validation, then reduce summary verbosity if it is too noisy for production.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
-
-```text
-Collector logs: transform/log_string_redaction has no OTTL parse errors and splunk_hec has no send failures.
-Logs search: "login token=synthetic-token" becomes "login token=***".
-Logs search: synthetic card-like values matching the configured patterns become "****".
-Logs search: structured body fields or attributes matching blocked key/value patterns are masked or removed; unrelated fields remain searchable.
-```
-
-You can sanity-check the string-body OTTL statement with a synthetic log record in an OTTL playground such as `https://ottl.run/`. Expected OTTL behavior:
-
-| Statement | Synthetic input | Expected result |
+| Log shape | Expected after applying this config | Validation target |
 | --- | --- | --- |
-| `replace_pattern(log.body, "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)", "$$1=***") where IsString(log.body)` | `log.body = "login token=synthetic-token"` | `log.body = "login token=***"`. |
+| Plain text body | `login token=*** user=demo` | The original `synthetic-token` string is absent. |
+| Credit-card-like value | Value matching the example card regex is replaced with `****`. | The original synthetic number is absent. |
+| Structured body or attributes | Matching keys or values are redacted by the redaction processor. | The original synthetic password/header value is absent; redaction summary behavior follows processor settings. |
 
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic OTLP log record, and the Collector `debug` exporter. This validates local transform and redaction processor behavior before any Splunk export.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic log body contained token=synthetic-token and card=4111111111111111; attributes included authorization=Bearer synthetic-token and safe.field=keep-me.
-```
-
-Observed after:
-
-```text
-debug exporter output contained login **** card=****, retained safe.field=keep-me, and included redaction.masked.count.
-```
-
-### Splunk Backend Payload Validation Status
-
-Checked with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The local Collector payload validation passed, but backend payload validation for this signal was not performed in this environment.
-
-```text
-Not performed.
-This cookbook processes log bodies and log attributes. No SPLUNK_HEC_TOKEN or Splunk log-query endpoint is configured in .env, so I cannot honestly query the ingested log body or log attributes in Splunk.
-The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.
-Backend validation is required; local health alone does not prove ingestion.
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-Plain string log bodies and structured log records need different handling. `replace_pattern(log.body, ...)` is explicit for string bodies. The redaction processor is then used for attributes and structured maps where it has documented support.
-
-The pipeline exports only logs through `splunk_hec`, matching the local logs examples in this backend.
+The transform processor can mask plain string log bodies, while the redaction processor covers attributes and structured body maps. Combining both gives better log coverage than either one alone.
 
 ## Troubleshooting
 
-If a string log body is not masked, confirm it is a string and that the regex matches the exact emitted format.
-
-If structured fields are removed unexpectedly, check whether you changed from `allow_all_keys: true` to an `allowed_keys` policy.
-
-If summaries are too noisy, switch `summary` to `silent` after rollout validation.
-
-If logs stop exporting, check `SPLUNK_HEC_TOKEN`, `SPLUNK_HEC_URL`, and Collector exporter errors.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Plain text logs are not masked | Check that `transform/log_string_redaction` is in the logs pipeline before export. | Fix pipeline order and regex syntax. |
+| Structured fields are not redacted | Check blocked key/value patterns in `redaction/log_maps_and_attributes`. | Add key patterns for the structured field names you actually emit. |
+| Collector reports processor errors | Check logs for regex or OTTL errors. | Test with synthetic examples and simplify patterns. |
 
 ## Scaling Recommendations
 
-Run logs redaction near the source when logs can contain sensitive values. A central gateway is easier to govern but still receives raw logs.
-
-Avoid broad, expensive regex patterns on very high-volume logs. Test CPU impact before production rollout.
-
-Keep a small synthetic log test suite with examples for every blocked pattern.
+* Keep regexes targeted; expensive broad patterns can increase CPU cost.
+* Start with high-risk keys and expand after reviewing real log schemas.
+* Monitor Collector CPU and dropped/refused log counters after rollout.
 
 ## Security and Operations Notes
 
-Do not test with real secrets or real payment data. Use synthetic examples that match the same structure.
-
-Masking credit-card-like patterns can produce false positives. Review both misses and over-masking with the application team.
-
-Redaction does not replace Splunk access controls, index controls, or retention policy.
+* Use synthetic secrets for validation; never send real tokens to prove redaction.
+* Keep HEC tokens in your platform secret store.
+* Treat redaction as a defense-in-depth control, not a compliance guarantee.
 
 ## Configuration Source Basis
 
-This recipe combines two documented processors for a common log problem: plain string bodies require OTTL string replacement through the transform processor, while structured log body maps and log attributes can use the redaction processor's blocked key and blocked value behavior.
-
-The redaction portion is based on the upstream redaction processor README, including `redact_all_types`, blocked key/value patterns, and summary audit attributes. The logs-only exporter pattern follows local Collector log examples that send logs through `splunk_hec`.
+This cookbook adapts the local `otelcol.yaml` example, transform processor body masking, redaction processor attribute/body-map behavior, and Splunk HEC exporter patterns.
 
 ## Official Documentation
 
-* [Splunk redaction processor](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/processors/redaction-processor)
-* [OpenTelemetry Collector redaction processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor)
-* [OpenTelemetry Collector transform processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/transformprocessor)
-* [Splunk guidance for removing data before ingest](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/get-started-understand-and-use-the-collector/remove-data-pre-ingest)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/transformprocessor
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor

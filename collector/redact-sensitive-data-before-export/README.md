@@ -2,203 +2,204 @@
 
 ## Scenario
 
-Use this recipe when traces, metrics, or logs can contain sensitive values in attributes and you need the Collector to mask or remove those values before export to Splunk Observability Cloud.
+You already have a Collector receiving traces, metrics, and logs and exporting them to Splunk Observability Cloud. In this scenario, you will add a redaction processor to mask sensitive-looking attributes and structured log fields before export.
 
-The example focuses on passwords, tokens, API keys, authorization headers, cookies, and credit-card-like strings. Do not treat this recipe as a compliance guarantee; it is a defensive control that must be paired with source-side data minimization and security review.
+Use this when telemetry can include passwords, tokens, API keys, authorization headers, cookies, or credit-card-like values. Do not treat this as a compliance guarantee; producers should still avoid emitting sensitive data.
+
+What you should capture before changing the Collector:
+
+| Signal | Example before this config | Risk |
+| --- | --- | --- |
+| Trace span attribute | `http.request.header.authorization=Bearer synthetic-token` | Header value can appear in APM span metadata. |
+| Metric datapoint attribute | `api_key=synthetic-key` | Sensitive label can create risky metric dimensions. |
+| Log attribute/body map | `password=synthetic-password` | Secret-like value can appear in logs. |
 
 ## Architecture Overview
 
 ```text
-applications and agents
-  -> OTLP traces, metrics, and logs
-  -> redaction processor
-  -> resourcedetection and Splunk context attributes
-  -> batch
-  -> Splunk APM, metrics ingest, and log ingest
+applications, agents, or SDKs
+  -> existing Collector OTLP receiver
+  -> redaction/sensitive processor
+  -> resource detection and Splunk context
+  -> existing Splunk trace, metrics, and log exporters
 ```
 
-The redaction processor runs before export. It can redact span attributes, log attributes, metric datapoint attributes, and structured log body maps according to the upstream documentation.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk Observability Cloud access token, HEC token, API URL, ingest URL, and HEC URL.
-* A Collector build that includes the `redaction` processor.
-* A reviewed list of blocked key patterns and blocked value patterns.
-* Test telemetry containing synthetic sensitive values, not real secrets.
-* Agreement on whether redaction summary attributes should be `info`, `debug`, or `silent`.
+* An existing Collector deployment that already receives the signals you want to protect.
+* Working Splunk exporters for traces, metrics, and logs as needed by your environment.
+* Access to edit the Collector configuration and restart or roll out the Collector safely.
+* A reviewed list of blocked key and value patterns.
+* Synthetic sensitive-looking test values for validation.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Copy [otelcol.yaml](./otelcol.yaml) to the Collector host or gateway.
-2. Replace the blocked key and value patterns with your approved policy.
-3. Export Splunk settings:
+1. Download or copy `otelcol.yaml` and compare it with your current Collector config.
+2. Copy `redaction/sensitive` into your existing `processors` block.
+3. Add `redaction/sensitive` after `memory_limiter` and before enrichment/export processors in each signal pipeline that needs protection.
+4. Replace blocked key/value patterns with your approved policy.
+5. Restart or roll out the Collector and send synthetic trace, metric, and log examples through it.
 
-   ```bash
-   export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-4. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 4317:4317 \
-     -p 4318:4318 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_ACCESS_TOKEN \
-     -e SPLUNK_HEC_TOKEN \
-     -e SPLUNK_API_URL \
-     -e SPLUNK_INGEST_URL \
-     -e SPLUNK_HEC_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml). The redaction block is:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
 processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
   redaction/sensitive:
     allow_all_keys: true
     redact_all_types: true
     blocked_key_patterns:
       - "(?i).*password.*"
+      - "(?i).*passwd.*"
+      - "(?i).*secret.*"
       - "(?i).*token.*"
       - "(?i).*api[_-]?key.*"
+      - "(?i).*authorization.*"
+      - "(?i).*cookie.*"
     blocked_values:
-      - "(?i)(password|token|api[_-]?key|secret)=([^\\s,;]+)"
+      - "(?i)(password|passwd|token|api[_-]?key|secret)=([^\\s,;]+)"
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+      - "\\b5[1-5][0-9]{14}\\b"
     summary: info
-```
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: redacted-telemetry
+  batch: {}
 
-`allow_all_keys: true` keeps attributes unless a blocked key or value pattern matches. Use an explicit `allowed_keys` policy instead if you need fail-closed attribute retention.
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction/sensitive, resourcedetection, resource/splunk_context, batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction/sensitive, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction/sensitive, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]
+```
 
 ## Validation
 
 ### Before Applying
 
-* Use only synthetic sensitive values. In a non-production environment, send a span with a synthetic `api_key` attribute, a metric datapoint attribute containing a synthetic token, a structured log body map with a synthetic password field, and any synthetic card-like value required by your policy.
-* Before enabling `redaction/sensitive`, check Splunk APM, Metric Finder, and logs search to confirm whether those synthetic values are visible in the current pipeline.
-* Review current Collector logs for OTLP receiver or exporter errors so missing telemetry is not mistaken for successful redaction.
-* Record unrelated attributes and fields that must remain visible after redaction.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-APM: synthetic api_key or authorization-like span attributes are visible if the current pipeline forwards them.
-Metric Finder: a synthetic token-like datapoint attribute is visible if the source emits it.
-Logs search: a structured body map field such as password=synthetic-password is visible if the current pipeline forwards structured log bodies.
-Collector logs: no redaction/sensitive processor is active, or existing processor/exporter errors are documented before rollout.
-```
+| Signal | Example before this config | Risk |
+| --- | --- | --- |
+| Trace span attribute | `http.request.header.authorization=Bearer synthetic-token` | Header value can appear in APM span metadata. |
+| Metric datapoint attribute | `api_key=synthetic-key` | Sensitive label can create risky metric dimensions. |
+| Log attribute/body map | `password=synthetic-password` | Secret-like value can appear in logs. |
 
 ### After Applying
 
-* Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration or processor errors involving `redaction/sensitive`, plus `otlphttp`, `signalfx`, or `splunk_hec` exporter errors.
-* Re-send the synthetic test telemetry. In Splunk APM, Metric Finder, and logs search, verify blocked keys or blocked values are masked or removed before export according to the redaction policy.
-* Confirm unrelated attributes and fields still arrive with expected resource context, including `deployment.environment` and `service.namespace=redacted-telemetry`.
-* While `summary: info` is enabled, use the redaction summary attributes as supporting evidence that the processor matched test records. Do not leave verbose summaries enabled if they are too noisy for production.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
+| Signal | Expected after applying this config | Validation target |
+| --- | --- | --- |
+| Trace span attribute | Original synthetic token/header value is not visible in APM span metadata. | The value is redacted or absent according to processor behavior. |
+| Metric datapoint attribute | Original sensitive-looking label value is not exported as-is. | Metric dimensions do not contain the synthetic secret. |
+| Log attribute/body map | Original password/token value is not visible in log search. | Redaction summary behavior follows the processor settings. |
 
-```text
-Collector logs: redaction/sensitive starts without configuration errors.
-APM/Metric Finder/logs: attributes whose keys match password, token, api_key, authorization, or cookie are masked or removed before export.
-APM/Metric Finder/logs: synthetic card-like values matching the configured blocked_values are masked.
-APM/Metric Finder/logs: redaction.masked.count or redaction.redacted.count appears while summary: info is enabled when the processor changes a record.
-```
-
-This expected result is based on the upstream redaction processor README, which documents `allow_all_keys`, `blocked_key_patterns`, `blocked_values`, `redact_all_types`, and summary audit attributes such as `redaction.masked.count` and `redaction.redacted.count`.
-
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces and logs, and the Collector `debug` exporter. This validates local redaction processor behavior before any Splunk export.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic span/log carried api_key=synthetic-api-key, card=4111111111111111, and password=synthetic-password.
-```
-
-Observed after:
-
-```text
-debug exporter output removed raw sensitive values, retained customer.id/message, and included redaction.masked.count audit evidence.
-```
-
-### Splunk Backend Payload Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
-
-```text
-Splunk realm: us0
-
-Before unredacted metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:redact-sensitive-data-before-export-before-1781592936
-  count: 1
-  dimensions: {"api_key": "synthetic-api-key", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "279f77925ade", "os.type": "linux", "password": "synthetic-password", "payment.note": "card=4111111111111111", "service.name": "codex-redaction-before", "sf_metric": null, "validation_run_id": "redact-sensitive-data-before-export-before-1781592936"}
-  customProperties: {"api_key": "synthetic-api-key", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "279f77925ade", "os.type": "linux", "password": "synthetic-password", "payment.note": "card=4111111111111111", "service.name": "codex-redaction-before", "validation_run_id": "redact-sensitive-data-before-export-before-1781592936"}
-
-After redacted metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:redact-sensitive-data-before-export-after-1781592936
-  count: 1
-  dimensions: {"api_key": "****", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "32fa31ad3c56", "os.type": "linux", "password": "****", "payment.note": "card=****", "redaction.masked.count": "3", "service.name": "codex-redaction-after", "sf_metric": null, "validation_run_id": "redact-sensitive-data-before-export-after-1781592936"}
-  customProperties: {"api_key": "****", "customer.id": "customer-123", "deployment.environment": "validation", "host.name": "32fa31ad3c56", "os.type": "linux", "password": "****", "payment.note": "card=****", "redaction.masked.count": "3", "service.name": "codex-redaction-after", "validation_run_id": "redact-sensitive-data-before-export-after-1781592936"}
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-The redaction processor is purpose-built for sensitive attribute handling. `blocked_key_patterns` catches known risky keys, while `blocked_values` catches sensitive-looking values that appear under otherwise allowed keys.
-
-`redact_all_types: true` asks the processor to evaluate non-string values through their string representation. That is useful for numeric identifiers that can match blocked value patterns, but it should be tested for your telemetry shape.
+Centralized redaction reduces the chance that accidental sensitive attributes reach Splunk. The tradeoff is that regex-based redaction can miss unexpected formats and can also redact useful data if patterns are too broad.
 
 ## Troubleshooting
 
-If a key is removed instead of masked, check whether you configured `allowed_keys`. Attributes not in `allowed_keys` are removed before blocked value checks.
-
-If redaction summaries reveal too much detail, use `summary: silent` after validation.
-
-If a plain text log body is not redacted, use the logs-specific recipe with transform-based string masking. The redaction processor documentation separately describes structured log body map behavior.
-
-If a secret pattern is missed, add a synthetic test case first and then update the regex.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Synthetic value still appears | Check whether the signal pipeline includes `redaction/sensitive` before export. | Add the processor to the correct pipeline and adjust key/value patterns. |
+| Useful attributes disappear | Review broad blocked key patterns. | Narrow regexes or move to an explicit allow-list policy after review. |
+| Collector CPU increases | Check regex complexity and telemetry volume. | Reduce broad value patterns and test on representative traffic. |
 
 ## Scaling Recommendations
 
-Keep blocked patterns focused. Large regex lists on high-volume gateways can increase CPU usage.
-
-Run redaction as close to the source as possible when data sensitivity is high. Gateway redaction can centralize policy, but sensitive data still travels to the gateway.
-
-Monitor Collector CPU, dropped data, and exporter queues after enabling broad redaction.
+* Start with the highest-risk keys and values and expand gradually.
+* Avoid using high-cardinality customer identifiers in validation examples.
+* Review redaction rules as application schemas change.
 
 ## Security and Operations Notes
 
-Never validate with real secrets. Use synthetic values that resemble the patterns you need to block.
-
-Keep redaction rules under review by security and service owners. Telemetry schemas change over time.
-
-Redaction does not change retention policy or access control in Splunk. Apply Splunk-side permissions and retention controls separately.
+* Never validate with real customer secrets.
+* Keep Splunk tokens in environment variables or secret managers.
+* Document the remaining risk: redaction is not a substitute for source-side data minimization.
 
 ## Configuration Source Basis
 
-This recipe starts from the upstream redaction processor README and adapts it to a Splunk export pipeline. The upstream processor documentation calls out sensitive-field leakage, privacy requirements, and payment-card-like values as typical use cases, and it documents how blocked keys, blocked values, all-type redaction, and summary audit attributes behave.
-
-The scenario is a realistic pre-export control for platform teams that need to reduce accidental leakage in traces, metric datapoint attributes, and structured log records. It is not a compliance guarantee; it is one Collector control that must be paired with source-side data minimization and Splunk-side access controls.
+This cookbook adapts the local `otelcol.yaml` example, OpenTelemetry redaction processor behavior, and Splunk exporter patterns used in the examples backend.
 
 ## Official Documentation
 
-* [Splunk redaction processor](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/processors/redaction-processor)
-* [OpenTelemetry Collector redaction processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor)
-* [Splunk guidance for removing data before ingest](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/get-started-understand-and-use-the-collector/remove-data-pre-ingest)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/redactionprocessor

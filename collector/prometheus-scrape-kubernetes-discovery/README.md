@@ -2,70 +2,79 @@
 
 ## Scenario
 
-Use this recipe when Kubernetes workloads expose Prometheus-format metrics and you want the Splunk OTel Collector Helm deployment to discover scrape targets inside the cluster.
+You already run the Splunk OpenTelemetry Collector Helm chart in Kubernetes. In this scenario, you will add a Helm values overlay so the Collector discovers selected Prometheus scrape targets in the cluster and exports those metrics to Splunk Observability Cloud.
 
-This pattern covers label-selected pod scraping with `receiver_creator` and annotation-selected service scraping with the Prometheus receiver's Kubernetes service discovery. Do not use this recipe when you need full Prometheus server features such as rules, Alertmanager configuration, remote read, or remote write in the Collector.
+Use this when workloads already expose Prometheus-format `/metrics` endpoints and you want a controlled discovery pattern. Do not use this as a full Prometheus server replacement for rules, Alertmanager, remote read, or remote write.
+
+What you should capture before changing the Collector:
+
+| Target | Example before this config | What you see |
+| --- | --- | --- |
+| Pod with `/metrics` | Deployment exposes `http_server_requests_total` but has no scrape label | Metric is absent from Splunk Metric Finder. |
+| Annotated service | Service is not annotated for scraping | No `kubernetes-service-metrics` scrape data appears. |
+| Cluster receiver logs | No Prometheus service discovery scrape job is configured | No scrape loop for annotated services. |
 
 ## Architecture Overview
 
 ```text
 Kubernetes pods and services
-  -> k8s observer or Prometheus kubernetes_sd_configs
-  -> prometheus receiver scrape jobs
-  -> memory_limiter, resourcedetection, resource, batch
-  -> signalfx exporter from the Splunk OTel Collector chart
-  -> Splunk Observability Cloud metrics ingest
+  -> Splunk OTel Collector Helm chart receivers
+  -> receiver_creator and prometheus receiver discovery
+  -> memory limiter, resource detection, resource, batch
+  -> signalfx exporter
 ```
 
-The agent pattern keeps pod scraping close to each node. The cluster receiver pattern is useful for service discovery where a single cluster-level scrape loop is acceptable.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* A Kubernetes cluster where the Splunk OTel Collector Helm chart is already used or approved.
-* Splunk Observability Cloud realm, access token, cluster name, and environment value.
-* Kubernetes RBAC that lets the Collector observe pods and services. The required permissions depend on your Helm chart configuration and enabled receivers.
-* Workloads labelled with `observability.splunk.com/scrape=true` for pod scraping, or services annotated with `prometheus.io/scrape=true` for service scraping.
-* A reviewed metric allow-list for each scrape job.
+* An existing Splunk OTel Collector Helm release in the target cluster.
+* Access to update the Helm values used by that release.
+* Existing Splunk Observability Cloud realm, access token secret, cluster name, and environment value.
+* RBAC that allows the enabled Collector components to observe pods and services.
+* Workloads or services that expose Prometheus-format metrics and have an approved metric allow-list.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Create or reuse a Kubernetes secret for the Splunk access token according to your existing chart practice.
-2. Review [values.yaml](./values.yaml) and replace `<cluster_name>` and `<environment_name>`.
-3. Label a pod-owning workload for pod scraping:
+1. Download or copy `values.yaml` and compare it with your current Helm values.
+2. Merge the `agent.config` and `clusterReceiver.config` sections into your existing values file.
+3. Replace `<cluster_name>` and `<environment_name>` with your standard chart values.
+4. Label pod-owning workloads with `observability.splunk.com/scrape=true` when using pod discovery.
+5. Annotate services with `prometheus.io/scrape=true`, `prometheus.io/port`, and `prometheus.io/path` when using service discovery.
+6. Run `helm upgrade` using your existing release name, namespace, secret management, and values file.
 
-   ```bash
-   kubectl label deployment <deployment_name> observability.splunk.com/scrape=true
-   ```
-
-4. Annotate a service for service scraping when needed:
-
-   ```bash
-   kubectl annotate service <service_name> prometheus.io/scrape=true
-   kubectl annotate service <service_name> prometheus.io/port='<metrics_port>'
-   kubectl annotate service <service_name> prometheus.io/path='/metrics'
-   ```
-
-5. Apply the Helm values:
-
-   ```bash
-   helm upgrade --install splunk-otel-collector \
-     splunk-otel-collector-chart/splunk-otel-collector \
-     --namespace splunk-otel-collector \
-     --create-namespace \
-     --set splunkObservability.realm='<realm>' \
-     --set secret.create=false \
-     --set secret.name='splunk-secret' \
-     -f values.yaml
-   ```
-
-Adjust the command to match your existing Helm release name and secret management.
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [values.yaml](./values.yaml) as the chart overlay. The pod discovery section follows the same `receiver_creator` pattern used by local GPU metric examples:
+Download the reusable example file: [values.yaml](./values.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Helm values overlay:
 
 ```yaml
+clusterName: "<cluster_name>"
+environment: "<environment_name>"
+
+secret:
+  create: false
+  name: splunk-secret
+
 agent:
+  discovery:
+    enabled: true
   config:
     receivers:
       receiver_creator/prometheus_pods:
@@ -73,143 +82,134 @@ agent:
         receivers:
           prometheus:
             rule: type == "pod" && labels["observability.splunk.com/scrape"] == "true"
+            config:
+              config:
+                scrape_configs:
+                  - job_name: kubernetes-pod-metrics
+                    scrape_interval: 30s
+                    scrape_timeout: 10s
+                    metrics_path: /metrics
+                    static_configs:
+                      - targets:
+                          - '`endpoint`'
+                    metric_relabel_configs:
+                      - source_labels: [__name__]
+                        regex: "(http_server_request_duration_seconds.*|http_server_requests_total|process_cpu_seconds_total|process_resident_memory_bytes)"
+                        action: keep
+    service:
+      pipelines:
+        metrics/prometheus-pods:
+          receivers:
+            - receiver_creator/prometheus_pods
+          processors:
+            - memory_limiter
+            - resourcedetection
+            - resource
+            - batch
+          exporters:
+            - signalfx
+
+clusterReceiver:
+  config:
+    receivers:
+      prometheus/kubernetes_services:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-service-metrics
+              scrape_interval: 30s
+              scrape_timeout: 10s
+              kubernetes_sd_configs:
+                - role: service
+              relabel_configs:
+                - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+                  regex: "true"
+                  action: keep
+                - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+                  regex: "(.+)"
+                  target_label: __metrics_path__
+                - source_labels:
+                    - __address__
+                    - __meta_kubernetes_service_annotation_prometheus_io_port
+                  regex: "([^:]+)(?::\\d+)?;(\\d+)"
+                  replacement: "$$1:$$2"
+                  target_label: __address__
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  regex: "(http_server_request_duration_seconds.*|http_server_requests_total|grpc_server_handled_total)"
+                  action: keep
+    service:
+      pipelines:
+        metrics/prometheus-services:
+          receivers:
+            - prometheus/kubernetes_services
+          processors:
+            - memory_limiter
+            - resourcedetection
+            - resource
+            - batch
+          exporters:
+            - signalfx
 ```
 
 ## Validation
 
 ### Before Applying
 
-* Confirm the workloads selected for scraping expose `/metrics` from inside the cluster, for example by using an existing debug pod or approved cluster troubleshooting workflow.
-* Check the current labels and annotations on the target workload and service. Record whether `observability.splunk.com/scrape=true` or `prometheus.io/scrape=true` is already present.
-* Review existing Collector pod logs for Kubernetes authorization, discovery, scrape, or `signalfx` export errors before changing Helm values.
-* In Splunk Observability Cloud Metric Finder, search for one allowed metric from the workload, such as `http_server_requests_total`, and note whether it is absent, duplicated, or missing expected Kubernetes dimensions.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-kubectl logs: no receiver_creator/prometheus_pods or prometheus/kubernetes_services receiver for the target, or discovery/RBAC errors are visible.
-Metric Finder: selected workload metrics are absent, duplicated by a different scraper, or missing Kubernetes dimensions.
-Kubernetes metadata: pods lack observability.splunk.com/scrape=true, or services lack prometheus.io/scrape=true.
-```
+| Target | Example before this config | What you see |
+| --- | --- | --- |
+| Pod with `/metrics` | Deployment exposes `http_server_requests_total` but has no scrape label | Metric is absent from Splunk Metric Finder. |
+| Annotated service | Service is not annotated for scraping | No `kubernetes-service-metrics` scrape data appears. |
+| Cluster receiver logs | No Prometheus service discovery scrape job is configured | No scrape loop for annotated services. |
 
 ### After Applying
 
-* After the Helm upgrade, run `kubectl logs` for the agent and cluster receiver pods and check for configuration, RBAC, discovery, scrape, or exporter errors involving `receiver_creator/prometheus_pods`, `prometheus/kubernetes_services`, `k8s_observer`, or `signalfx`.
-* Verify that labelled pods and annotated services are being selected by the intended discovery path. If both pod and service scraping are enabled for the same endpoint, check for duplicate series before rolling out broadly.
-* In Metric Finder, search for a metric allowed by the relevant `metric_relabel_configs` rule and confirm it has the expected Kubernetes and environment context from the chart and resource processors.
-* In a non-production namespace, remove the scrape label or annotation from a test target and confirm future samples from that target stop arriving after the scrape interval and ingest delay.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
+| Target | Expected after applying this config | How to validate |
+| --- | --- | --- |
+| Labelled pod | Metrics matching the allow-list, such as `http_server_requests_total`, are exported. | Search Metric Finder for the metric and Kubernetes dimensions. |
+| Annotated service | `kubernetes-service-metrics` scrape job exports allowed service metrics. | Confirm metrics appear with service/cluster labels. |
+| Unlabelled workload | No metrics are scraped by this rule. | Remove or omit the label and confirm the target is ignored. |
 
-```text
-kubectl logs: receiver_creator/prometheus_pods and prometheus/kubernetes_services load without discovery or scrape errors.
-Metric Finder: allowed workload metrics arrive with cluster, namespace, pod/service, and environment context.
-Metric Finder: removing the scrape label or annotation from a test target stops new samples from that target after normal scrape and ingest delay.
-```
-
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic Prometheus endpoint, and the Collector `debug` exporter. The local run validates the scrape, relabel, processor, and export behavior with a static target equivalent; Kubernetes API discovery still requires cluster validation.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic endpoint exposed an application metric and a runtime metric.
-```
-
-Observed after:
-
-```text
-debug exporter output contained the application metric and excluded the runtime metric by relabel rule.
-```
-
-### Splunk Backend Payload Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
-
-```text
-Splunk realm: us0
-
-Before retained service metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-kubernetes-discovery-before-1781592821
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "checkout", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
-  customProperties: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "checkout", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
-
-Before runtime-style metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-kubernetes-discovery-before-1781592821
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "runtime", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
-  customProperties: {"deployment.environment": "validation", "host.name": "41f0361a157a", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58215", "service": "runtime", "service.instance.id": "host.docker.internal:58215", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-before-1781592821"}
-
-After retained service metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-kubernetes-discovery-after-1781592821
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "f150d1916acc", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58236", "service": "checkout", "service.instance.id": "host.docker.internal:58236", "service.name": "kubernetes-service-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-after-1781592821"}
-  customProperties: {"deployment.environment": "validation", "host.name": "f150d1916acc", "k8s_namespace_name": "shop", "os.type": "linux", "server.address": "host.docker.internal", "server.port": "58236", "service": "checkout", "service.instance.id": "host.docker.internal:58236", "service.name": "kubernetes-service-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-kubernetes-discovery-after-1781592821"}
-
-After runtime-style metric lookup:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: False
-  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-kubernetes-discovery-after-1781592821
-  count: 0
-  evidence: count=0
-  evidence: metric=None
-  evidence: dimensions={}
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-The recipe separates pod and service discovery because their ownership models differ. Pod scraping is node-local and label-driven. Service scraping uses Prometheus Kubernetes service discovery and standard Prometheus relabeling.
-
-Metric allow-listing is done in `metric_relabel_configs` so unwanted series are dropped before they enter later Collector processors or the Splunk exporter.
+Discovery-based scraping lets platform teams opt in workloads without hard-coding every pod IP. The allow-list keeps noisy or accidental metrics from expanding cardinality unexpectedly.
 
 ## Troubleshooting
 
-If no pod metrics arrive, confirm discovery is enabled and the pod has the exact `observability.splunk.com/scrape=true` label.
-
-If service metrics do not arrive, confirm the service annotations and port are correct. The relabel rule rewrites `__address__` using `prometheus.io/port`; a missing or wrong annotation points the scrape at the wrong port.
-
-If the Collector reports Kubernetes authorization errors, review the Helm chart RBAC settings before changing receiver config.
-
-If duplicate metrics appear, check whether both the pod and service jobs are scraping the same endpoint.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Metrics do not appear | Check pod labels, service annotations, and Collector pod logs for scrape errors. | Fix labels/annotations, port, or metrics path. |
+| Too many metrics appear | Review `metric_relabel_configs`. | Narrow the allow-list before broad rollout. |
+| Collector cannot watch resources | Check service account RBAC. | Update Helm/RBAC settings according to your chart deployment policy. |
 
 ## Scaling Recommendations
 
-Start with narrow labels and annotations. Do not enable broad namespace-wide scraping until metric volume and cardinality have been reviewed.
-
-For high-volume targets, prefer node-local agent scraping to reduce cross-node traffic. For service-level targets that should be scraped once per cluster, keep them in the cluster receiver.
-
-Avoid multiple identical cluster receiver replicas scraping the same service set unless you intentionally want duplicate scrapes or have a target allocation strategy.
+* Use pod-level scraping for node-local workloads and service discovery for cluster-level scrape loops intentionally.
+* Keep metric allow-lists small at first and expand only after reviewing cardinality.
+* Watch Collector CPU and memory when increasing scrape target count or reducing scrape interval.
 
 ## Security and Operations Notes
 
-Treat Kubernetes labels and annotations as operational control surfaces. Limit who can add scrape-enabling labels or annotations in production namespaces.
-
-Do not put application credentials in service annotations. Use Kubernetes secrets and supported Prometheus authentication settings for authenticated targets.
-
-Keep metric allow-lists reviewed. Kubernetes and application labels can create high-cardinality dimensions quickly.
+* Do not put Splunk tokens directly in values files.
+* Avoid scraping endpoints that expose secrets or customer data as labels.
+* Use Kubernetes secrets and existing chart secret-management conventions.
 
 ## Configuration Source Basis
 
-This recipe combines two real-world Kubernetes scrape patterns: pod selection through Collector receiver creation and service selection through Prometheus Kubernetes service discovery. The `kubernetes_sd_configs`, annotation relabeling, and `metric_relabel_configs` blocks follow Prometheus discovery conventions and the OpenTelemetry Collector Prometheus receiver documentation.
-
-The Helm shape follows local Splunk OTel Collector values examples in this backend, where agent and cluster receiver config are extended under chart values. The labels and annotations are deliberately explicit so platform teams can control which workloads become scrape targets.
+This cookbook adapts the local Helm values file, Splunk OTel Collector Helm chart patterns, and Prometheus receiver Kubernetes discovery concepts into an existing Helm release workflow.
 
 ## Official Documentation
 
-* [Splunk Prometheus receiver](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/receivers/prometheus-receiver)
-* [OpenTelemetry Collector Prometheus receiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)
-* [Prometheus Kubernetes service discovery configuration](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-for-kubernetes
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver

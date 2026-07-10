@@ -2,225 +2,202 @@
 
 ## Scenario
 
-Use this recipe when a platform team wants to drop low-value telemetry in the Collector before it reaches Splunk Observability Cloud.
+You already have an OpenTelemetry Collector receiving traces, metrics, and logs and exporting them to Splunk Observability Cloud. In this scenario, you will add a `filter` processor so the Collector drops known low-value telemetry before export.
 
-The example drops health-check spans, low-severity logs, unwanted runtime metrics, and known noisy route datapoints. Do not use this recipe as the first response to an unknown data quality issue; validate that the dropped telemetry is truly low value and does not hide incident evidence.
+Use this when platform teams have agreed that specific health-check spans, low-severity logs, runtime metrics, or route-level datapoints are noisy and do not need to be sent to Splunk. Do not use this as a first response to unknown telemetry volume; validate that the dropped data is truly low value and does not hide incident evidence.
+
+What you should capture before changing the Collector:
+
+| Signal | Example before this config | What you see |
+| --- | --- | --- |
+| Trace span | `GET /health` or `GET /ready` | Health-check spans appear in APM for the service. |
+| Metric | `go_memstats_alloc_bytes`, `process_cpu_seconds_total`, `promhttp_metric_handler_requests_total` | Runtime/exporter metrics appear in Metric Finder. |
+| Metric datapoint | `http.server.duration{http.route="/health"}` | Health route datapoints are visible. |
+| Log | `INFO healthcheck ok` or `DEBUG ready probe passed` | Low-value health logs appear in log search. |
 
 ## Architecture Overview
 
 ```text
-applications and agents
-  -> OTLP traces, metrics, and logs
-  -> Splunk OTel Collector filter processor
-  -> memory_limiter, resourcedetection, resource/splunk_context, batch
-  -> Splunk APM, metrics ingest, and log ingest
+applications, agents, or SDKs
+  -> existing Collector OTLP receiver
+  -> filter/noise processor
+  -> resource detection and Splunk context
+  -> existing Splunk exporters
 ```
 
-The filter processor evaluates OTTL conditions by signal. When any condition matches, the matching span, metric, datapoint, or log record is dropped from the Collector pipeline.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk Observability Cloud access token, HEC token, API URL, ingest URL, and HEC URL.
-* A Collector build that includes the `filter` processor and the exporters used in [otelcol.yaml](./otelcol.yaml).
-* Agreement from service owners on the routes, severities, and metric names that can be dropped.
-* A non-production validation environment where filter conditions can be tested against representative telemetry.
-* A Collector version whose filter processor supports the documented `trace_conditions`, `metric_conditions`, and `log_conditions` syntax. Older syntax can still exist in local examples, but this recipe uses the current documented form.
+* An existing Collector deployment that already receives OTLP traces, metrics, and logs.
+* Access to edit the Collector configuration and restart or roll out the Collector safely.
+* Splunk Observability Cloud access token, HEC token, ingest URL, API URL, and HEC URL already available through your normal secret mechanism.
+* A reviewed list of span names, metric names, route attributes, and log patterns that are safe to drop.
+* Representative non-production telemetry to prove retained data still arrives after the filter is applied.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Copy [otelcol.yaml](./otelcol.yaml) to the Collector host or gateway.
-2. Replace the example OTTL conditions with your approved drop policy.
-3. Export Splunk settings:
+1. Download or copy `otelcol.yaml` from this cookbook and compare it with your current Collector config.
+2. Copy the `filter/noise` processor into your existing `processors` block.
+3. Add `filter/noise` after `memory_limiter` and before enrichment/export processors in the affected `traces`, `metrics`, and `logs` pipelines.
+4. Replace the example OTTL conditions with your approved drop policy.
+5. Restart the Collector or roll out the updated config using your existing deployment method.
 
-   ```bash
-   export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-4. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 4317:4317 \
-     -p 4318:4318 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_ACCESS_TOKEN \
-     -e SPLUNK_HEC_TOKEN \
-     -e SPLUNK_API_URL \
-     -e SPLUNK_INGEST_URL \
-     -e SPLUNK_HEC_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
-
-Pin the Collector image version after validating the exact OTTL syntax.
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml). The core processor block is:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
 processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
   filter/noise:
     error_mode: ignore
     trace_conditions:
       - 'IsMatch(span.name, ".*/(health|ready|live|metrics).*")'
     metric_conditions:
       - 'IsMatch(metric.name, "^(go_|process_|promhttp_).*")'
+      - 'datapoint.attributes["http.route"] == "/health"'
+      - 'datapoint.attributes["http.target"] == "/metrics"'
     log_conditions:
       - 'log.severity_number < SEVERITY_NUMBER_WARN'
+      - 'IsMatch(log.body, "(?i).*health(check)?.*")'
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: filtered-telemetry
+  batch: {}
+
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [otlphttp]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/noise, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]
 ```
 
 ## Validation
 
 ### Before Applying
 
-* In a non-production environment, send representative telemetry that should later be dropped: a health or readiness span, a `go_`, `process_`, or `promhttp_` metric, a datapoint with `http.route=/health`, and a low-severity or health-check log record.
-* Send matching retained telemetry at the same time, such as an error span, an application metric not covered by the drop rules, and a warning or error log.
-* Before enabling `filter/noise`, use Splunk APM, Metric Finder, and logs search to confirm both noisy and retained examples can be observed. This establishes that later absence is caused by the filter, not by missing instrumentation.
-* Review the current Collector logs for OTLP receiver, processor, or exporter errors so existing ingestion problems are separated from filter behavior.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-APM: a span named GET /health or GET /ready is visible.
-Metric Finder: go_*, process_*, or promhttp_* metrics are visible when sent by the source.
-Logs search: DEBUG/INFO health-check logs are visible alongside WARN/ERROR application logs.
-Collector logs: no filter/noise processor is active for these pipelines.
-```
+| Signal | Example before this config | What you see |
+| --- | --- | --- |
+| Trace span | `GET /health` or `GET /ready` | Health-check spans appear in APM for the service. |
+| Metric | `go_memstats_alloc_bytes`, `process_cpu_seconds_total`, `promhttp_metric_handler_requests_total` | Runtime/exporter metrics appear in Metric Finder. |
+| Metric datapoint | `http.server.duration{http.route="/health"}` | Health route datapoints are visible. |
+| Log | `INFO healthcheck ok` or `DEBUG ready probe passed` | Low-value health logs appear in log search. |
 
 ### After Applying
 
-* Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration, OTTL parse, or evaluation errors involving `filter/noise`. Also check for `otlphttp`, `signalfx`, or `splunk_hec` exporter errors.
-* Re-send the same dropped and retained test telemetry. In Splunk APM, health-check spans should be absent while retained error or non-health spans remain visible.
-* In Metric Finder, verify metrics matching the configured noisy names or route attributes are not newly exported, while retained service metrics still arrive with expected resource context.
-* In logs search, verify low-severity or health-check logs are absent and warning or error logs from the same test source still arrive.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
-
-```text
-Collector logs: no OTTL parse errors for filter/noise.
-APM: GET /health or GET /ready spans sent through this Collector are absent; retained non-health or error spans remain visible.
-Metric Finder: go_*, process_*, and promhttp_* series are not newly exported by this Collector; allowed service metrics still arrive.
-Logs search: low-severity health-check logs are absent; WARN/ERROR logs from the same source remain visible.
-```
-
-You can sanity-check the OTTL conditions with synthetic records in an OTTL playground such as `https://ottl.run/`. Use non-sensitive samples only. Expected OTTL behavior:
-
-| Condition | Synthetic input | Expected result |
+| Signal | Expected after applying this config | What should remain visible |
 | --- | --- | --- |
-| `IsMatch(span.name, ".*/(health|ready|live|metrics).*")` | `span.name = "GET /health"` | `true`, record is dropped. |
-| `IsMatch(metric.name, "^(go_|process_|promhttp_).*")` | `metric.name = "process_cpu_seconds_total"` | `true`, metric is dropped. |
-| `log.severity_number < SEVERITY_NUMBER_WARN` | `log.severity_number = SEVERITY_NUMBER_INFO` | `true`, log is dropped. |
+| Trace span | `GET /health` and `GET /ready` are no longer exported by this Collector. | Error spans and non-health request spans still appear in APM. |
+| Metric | Metrics matching `go_*`, `process_*`, and `promhttp_*` are dropped by this Collector. | Application metrics outside the allow/drop rules still appear. |
+| Metric datapoint | Datapoints with `http.route="/health"` are dropped. | Business or service-level routes still appear. |
+| Log | Low-severity or health-check logs are not exported. | Warning and error logs from the same service still appear. |
 
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, synthetic OTLP traces, metrics, and logs, and the Collector `debug` exporter. This validates local Collector filter behavior before any Splunk export.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic batch included GET /health, process_cpu_seconds_total, healthcheck ok, GET /checkout, checkout_requests_total, and checkout failed.
-```
-
-Observed after:
-
-```text
-debug exporter output retained GET /checkout, checkout_requests_total, and checkout failed; dropped the noisy samples.
-```
-
-### Splunk Backend Payload Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
-
-```text
-Splunk realm: us0
-
-Before health-route metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-before-health-1781592848
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/health", "os.type": "linux", "service.name": "codex-filter-before", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-before-health-1781592848"}
-  customProperties: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/health", "os.type": "linux", "service.name": "codex-filter-before", "validation_run_id": "filter-noisy-telemetry-before-export-before-health-1781592848"}
-
-Before checkout-route metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-before-checkout-1781592848
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-before", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-before-checkout-1781592848"}
-  customProperties: {"deployment.environment": "validation", "host.name": "0c0d08999401", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-before", "validation_run_id": "filter-noisy-telemetry-before-export-before-checkout-1781592848"}
-
-After health-route lookup:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: False
-  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-after-health-1781592848
-  count: 0
-  evidence: count=0
-  evidence: metric=None
-  evidence: dimensions={}
-
-After checkout-route metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:filter-noisy-telemetry-before-export-after-checkout-1781592848
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "acd7bf48e79e", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-after", "sf_metric": null, "validation_run_id": "filter-noisy-telemetry-before-export-after-checkout-1781592848"}
-  customProperties: {"deployment.environment": "validation", "host.name": "acd7bf48e79e", "http.route": "/checkout", "os.type": "linux", "service.name": "codex-filter-after", "validation_run_id": "filter-noisy-telemetry-before-export-after-checkout-1781592848"}
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-`error_mode: ignore` keeps valid telemetry flowing if a condition cannot evaluate on a particular record. The filter processor is placed early, after `memory_limiter`, so dropped telemetry does not consume later processor and exporter capacity.
-
-Keep conditions specific and easy to test. If you add latency or duration-based rules, validate the exact OTTL expression against your deployed Collector version before rollout.
+Filtering at the Collector reduces export volume before data leaves your environment and keeps the drop policy centralized. The tradeoff is operational risk: overly broad OTTL conditions can hide useful telemetry, so start narrow and validate retained signals.
 
 ## Troubleshooting
 
-If the Collector fails to start, check the filter processor error for the exact OTTL statement and compare it with the processor documentation for your Collector version.
-
-If too much data is dropped, disable one condition at a time and validate with known trace IDs, metric names, or log messages.
-
-If expected low-severity logs still arrive, check whether the source populates `severity_number`. Some log sources only populate text severity until parsed upstream.
-
-If route filtering is ineffective for metrics, inspect the datapoint attributes produced by your receiver. Not every metric has `http.route` or `http.target`.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Collector fails to start | Check Collector logs for OTTL parse errors in `filter/noise`. | Fix the condition syntax and test with non-sensitive samples before rollout. |
+| Expected telemetry is missing | Temporarily remove one condition or test it in isolation. | Narrow broad regexes and add explicit exceptions where needed. |
+| No volume change | Confirm the pipeline includes `filter/noise` before exporters. | Add the processor to every affected signal pipeline. |
 
 ## Scaling Recommendations
 
-Roll out filter changes gradually. Start with a single service, namespace, or Collector gateway before applying broad policies.
-
-Keep a review process for every new drop rule. Dropping telemetry reduces cost and noise but also removes forensic data.
-
-For high-volume Prometheus metrics, prefer scrape-time `metric_relabel_configs` when possible. Use the filter processor when the decision requires OTTL context across signals.
+* Keep filter rules narrow and owned by service/platform teams.
+* Track dropped versus retained volume during rollout using Collector and Splunk-side telemetry.
+* Apply the same filter policy consistently across gateway replicas or node agents that handle the same services.
 
 ## Security and Operations Notes
 
-Treat filter rules as production controls. A bad rule can hide outages, failed authentication, or suspicious traffic.
-
-Keep the configuration in source control and require review from service owners for route, status, and severity based drops.
-
-Do not use filters to redact secrets. Use the redaction or transform recipes when data must be retained but masked.
+* Do not use filtering as the only protection for sensitive data; producers should avoid emitting secrets.
+* Review drop rules with incident responders before removing telemetry classes.
+* Use placeholders for Splunk tokens and keep credentials in your existing secret manager.
 
 ## Configuration Source Basis
 
-This recipe is based on the upstream filter processor model where matching OTTL conditions drop telemetry by signal. The local Cisco AI Ready Pods examples already use filter processors for health and metric-selection patterns; this cookbook generalizes that operational pattern to common application telemetry noise.
-
-The examples intentionally use simple span-name, metric-name, datapoint-attribute, and severity predicates. They are realistic production controls, but each rule must be reviewed against the source telemetry schema before rollout because filtering removes data.
+This cookbook adapts the existing Collector config in `otelcol.yaml`, the OpenTelemetry Collector filter processor pattern, and Splunk OpenTelemetry Collector exporter patterns already used in this backend repository.
 
 ## Official Documentation
 
-* [Splunk filter processor](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/processors/filter-processor)
-* [OpenTelemetry Collector filter processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/filterprocessor)
-* [OpenTelemetry Transformation Language](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/pkg/ottl)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/filterprocessor

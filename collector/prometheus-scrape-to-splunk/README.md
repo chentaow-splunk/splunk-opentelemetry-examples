@@ -2,65 +2,66 @@
 
 ## Scenario
 
-Use this recipe when an operations team needs the Splunk Distribution of the OpenTelemetry Collector to scrape Prometheus-format `/metrics` endpoints and export those metrics to Splunk Observability Cloud.
+You already have a Collector host or gateway that can reach Prometheus-format `/metrics` endpoints. In this scenario, you will add a Prometheus receiver scrape job and export the allowed metrics to Splunk Observability Cloud.
 
-This pattern fits application endpoints, vendor exporters, authenticated HTTPS appliances, and metric allow-listing before export. Do not use this recipe when you need Prometheus alerting rules, remote read, or remote write behavior inside the Collector; the upstream Prometheus receiver documentation calls out unsupported advanced Prometheus server features.
+Use this for application endpoints, exporters, or appliances that expose Prometheus metrics. Do not use this when you need Prometheus alert rules, remote read, or remote write inside the Collector.
+
+What you should capture before changing the Collector:
+
+| Target | Example before this config | What you see |
+| --- | --- | --- |
+| App metrics endpoint | `app-1.example.internal:8080/metrics` returns `http_server_requests_total` | Metric is not present in Splunk because nothing scrapes it. |
+| HTTPS appliance | Appliance exposes `appliance_errors_total` with bearer auth | Metric is absent or only visible in a separate Prometheus deployment. |
+| Collector logs | No `prometheus/static_targets` receiver | No scrape activity for these targets. |
 
 ## Architecture Overview
 
 ```text
 Prometheus /metrics targets
-  -> Splunk OTel Collector prometheus receiver
-  -> metric_relabel_configs allow-listing
-  -> memory_limiter, resourcedetection, resource/splunk_context, batch
+  -> existing Collector prometheus receiver
+  -> metric_relabel_configs allow-list
+  -> resource detection and Splunk context
   -> signalfx exporter
-  -> Splunk Observability Cloud metrics ingest
 ```
 
-The Collector owns scraping, enrichment, and export. Application teams keep exposing Prometheus metrics, while platform teams centralize Splunk access token handling and consistent resource attributes.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk Observability Cloud realm, access token, API URL, and ingest URL.
-* Network access from the Collector host to each scrape target and to `https://api.<realm>.observability.splunkcloud.com` and `https://ingest.<realm>.observability.splunkcloud.com`.
-* A Collector build that includes the `prometheus` receiver, `memory_limiter`, `resourcedetection`, `resource`, `batch`, and `signalfx` components. The Splunk Distribution component list includes these components.
-* For authenticated HTTPS targets, a readable bearer token file or another Prometheus-supported authentication block, plus any required CA certificate.
-* A reviewed metric allow-list. The example allow-list is intentionally narrow and must be changed for your target names.
+* An existing Collector deployment with network access to the scrape targets.
+* Access to edit the Collector configuration and restart or roll out the Collector safely.
+* Splunk Observability Cloud access token, ingest URL, and API URL already available through your secret mechanism.
+* Approved target hostnames, metrics paths, authentication files, and CA files.
+* A reviewed allow-list of metric names to keep.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Copy [otelcol.yaml](./otelcol.yaml) to the Collector host.
-2. Replace the placeholder targets, CA path, bearer token path, and `metric_relabel_configs` with values for your environment.
-3. Export Splunk and environment settings:
+1. Download or copy `otelcol.yaml` and compare it with your current Collector config.
+2. Copy the `prometheus/static_targets` receiver into your existing `receivers` block.
+3. Replace example targets, bearer token file paths, CA paths, and `metric_relabel_configs` with your approved values.
+4. Add the receiver to a metrics pipeline that includes `memory_limiter`, resource enrichment, `batch`, and your Splunk metrics exporter.
+5. Restart or roll out the Collector and verify scrape activity in Collector logs.
 
-   ```bash
-   export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-4. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 8888:8888 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_ACCESS_TOKEN \
-     -e SPLUNK_API_URL \
-     -e SPLUNK_INGEST_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     -v "$(pwd)/secrets:/etc/collector/secrets:ro" \
-     -v "$(pwd)/certs:/etc/collector/certs:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
-
-Pin the Collector image version for production rollouts after testing the exact component syntax you deploy.
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml) as the starting point. The key receiver pattern is:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
 receivers:
@@ -68,150 +69,131 @@ receivers:
     config:
       scrape_configs:
         - job_name: app-metrics
+          scrape_interval: 30s
+          scrape_timeout: 10s
+          metrics_path: /metrics
           static_configs:
             - targets:
                 - app-1.example.internal:8080
+                - app-2.example.internal:8080
           metric_relabel_configs:
             - source_labels: [__name__]
-              regex: "(http_server_request_duration_seconds.*|http_server_requests_total)"
+              regex: "(http_server_request_duration_seconds.*|http_server_requests_total|process_cpu_seconds_total|process_resident_memory_bytes)"
               action: keep
+        - job_name: https-appliance
+          scheme: https
+          scrape_interval: 60s
+          scrape_timeout: 15s
+          metrics_path: /metrics
+          authorization:
+            type: Bearer
+            credentials_file: /etc/collector/secrets/prometheus_bearer_token
+          tls_config:
+            ca_file: /etc/collector/certs/appliance-ca.pem
+            server_name: appliance.example.internal
+            insecure_skip_verify: false
+          static_configs:
+            - targets:
+                - appliance.example.internal:443
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "(appliance_requests_total|appliance_errors_total|appliance_latency_seconds.*)"
+              action: keep
+
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: prometheus-scrapes
+  batch: {}
+
+exporters:
+  signalfx:
+    access_token: "${env:SPLUNK_ACCESS_TOKEN}"
+    api_url: "${env:SPLUNK_API_URL}"
+    ingest_url: "${env:SPLUNK_INGEST_URL}"
+    sync_host_metadata: true
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [prometheus/static_targets]
+      processors: [memory_limiter, resourcedetection, resource/splunk_context, batch]
+      exporters: [signalfx]
 ```
 
 ## Validation
 
 ### Before Applying
 
-* From the Collector host, confirm each planned target exposes the expected `/metrics` endpoint and that the metric names you intend to keep are present.
-* Review the current Collector logs, if a Collector is already running, for scrape or export failures. Record whether there is already a Prometheus scrape job for these targets and whether exporter errors are present before changing the configuration.
-* If Collector self-telemetry is enabled, check it for scrape failures before rollout so target reachability issues are not mistaken for Splunk export problems.
-* In Splunk Observability Cloud Metric Finder, search for one metric expected to match the allow-list, such as `http_server_requests_total` or `appliance_requests_total`, and note whether it is absent or missing expected resource dimensions.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-Collector logs: no prometheus/static_targets receiver, or existing scrape failures for the target.
-Metric Finder: target metrics are absent, duplicated by another scraper, or present without deployment.environment/service.namespace.
-Scrape endpoint: curl http://app-1.example.internal:8080/metrics shows metrics such as http_server_requests_total.
-```
+| Target | Example before this config | What you see |
+| --- | --- | --- |
+| App metrics endpoint | `app-1.example.internal:8080/metrics` returns `http_server_requests_total` | Metric is not present in Splunk because nothing scrapes it. |
+| HTTPS appliance | Appliance exposes `appliance_errors_total` with bearer auth | Metric is absent or only visible in a separate Prometheus deployment. |
+| Collector logs | No `prometheus/static_targets` receiver | No scrape activity for these targets. |
 
 ### After Applying
 
-* Start the Collector with [otelcol.yaml](./otelcol.yaml) and review logs for configuration or startup errors involving `prometheus/static_targets`, `memory_limiter`, `resource/splunk_context`, or the `signalfx` exporter.
-* Watch Collector logs, and self-telemetry when enabled, for scrape failures from the `app-metrics` or `https-appliance` jobs and for exporter send errors.
-* In Metric Finder, search for a metric kept by `metric_relabel_configs` and confirm it appears with the expected environment context, such as `deployment.environment` and `service.namespace=prometheus-scrapes`.
-* In a non-production environment, compare a metric name outside the allow-list with one inside the allow-list. The kept metric should be available for charting, while the intentionally excluded metric should not be newly exported by this Collector configuration.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
+| Target | Expected after applying this config | How to validate |
+| --- | --- | --- |
+| App metrics endpoint | `http_server_requests_total` and request-duration metrics appear in Splunk. | Search Metric Finder for the metric names and target labels. |
+| HTTPS appliance | Allowed `appliance_*` metrics appear after authentication succeeds. | Check Collector logs for scrape/export errors and Metric Finder for appliance metrics. |
+| Non-allowed metrics | Metrics outside `metric_relabel_configs` are dropped before export. | Confirm noisy or unwanted metric names are absent. |
 
-```text
-Collector logs: prometheus/static_targets starts without scrape manager errors; signalfx exporter reports no send failures.
-Metric Finder: http_server_requests_total or appliance_requests_total appears with deployment.environment and service.namespace=prometheus-scrapes.
-Metric Finder: a metric excluded by metric_relabel_configs does not appear from this Collector instance after the scrape interval and ingest delay.
-```
-
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, a synthetic Prometheus endpoint, and the Collector `debug` exporter. This validates the Collector scrape, relabel, processor, and export path locally; it does not prove connectivity to a live Splunk tenant.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic endpoint exposed http_server_requests_total and promhttp_metric_handler_requests_total.
-```
-
-Observed after:
-
-```text
-debug exporter output contained http_server_requests_total with deployment.environment=validation; excluded promhttp_metric_handler_requests_total was not exported.
-```
-
-### Splunk Backend Payload Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The harness exported synthetic before/after telemetry through live Collector instances and queried Splunk Observability Cloud `/v2/metrictimeseries` for the actual ingested metric dimensions.
-
-```text
-Splunk realm: us0
-
-Before retained metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-to-splunk-before-1781592789
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
-  customProperties: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
-
-Before metric that should be dropped after relabel:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-to-splunk-before-1781592789
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/internal", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
-  customProperties: {"deployment.environment": "validation", "host.name": "176493d1dee2", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/internal", "server.address": "host.docker.internal", "server.port": "58134", "service.instance.id": "host.docker.internal:58134", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-before-1781592789"}
-
-After retained metric:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: True
-  query: sf_metric:test_requests_total AND validation_run_id:prometheus-scrape-to-splunk-after-1781592789
-  count: 1
-  dimensions: {"deployment.environment": "validation", "host.name": "2aa93f94923f", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58175", "service.instance.id": "host.docker.internal:58175", "service.name": "app-metrics-backend-validation", "sf_metric": null, "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-after-1781592789"}
-  customProperties: {"deployment.environment": "validation", "host.name": "2aa93f94923f", "os.type": "linux", "recipe_slug": "prometheus-scrape-to-splunk", "route": "/checkout", "server.address": "host.docker.internal", "server.port": "58175", "service.instance.id": "host.docker.internal:58175", "service.name": "app-metrics-backend-validation", "url.scheme": "http", "validation_run_id": "prometheus-scrape-to-splunk-after-1781592789"}
-
-After dropped metric lookup:
-  API: /v2/metrictimeseries
-  HTTP status: 200
-  found: False
-  query: sf_metric:test_connections_active AND validation_run_id:prometheus-scrape-to-splunk-after-1781592789
-  count: 0
-  evidence: count=0
-  evidence: metric=None
-  evidence: dimensions={}
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-The `prometheus` receiver keeps scrape configuration close to Prometheus conventions, including static targets, HTTPS settings, authentication, and relabeling. The `metric_relabel_configs` block reduces volume before export rather than sending unwanted series to Splunk.
-
-`memory_limiter` protects the Collector during scrape bursts. `resourcedetection` and `resource/splunk_context` add stable context, and `batch` improves export efficiency. The `signalfx` exporter follows existing local examples for Splunk Observability Cloud metrics.
+Putting Prometheus scraping in the Collector centralizes Splunk credentials and resource metadata while letting application teams keep their existing Prometheus endpoints. The allow-list reduces cardinality and avoids exporting accidental metrics.
 
 ## Troubleshooting
 
-If no metrics arrive, confirm the target is reachable from the Collector host and that `metrics_path`, scheme, and port are correct.
-
-If HTTPS scrapes fail, check the CA file, `server_name`, and bearer token file permissions before considering `insecure_skip_verify`. Leave `insecure_skip_verify: false` for production unless your security team approves otherwise.
-
-If expected metrics are missing, inspect `metric_relabel_configs`. A `keep` action drops every metric name that does not match the regex.
-
-If Splunk export fails, verify `SPLUNK_ACCESS_TOKEN`, `SPLUNK_API_URL`, and `SPLUNK_INGEST_URL`.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Scrape fails | Check Collector logs for target connection, TLS, or authentication errors. | Fix target address, CA file, bearer token file, or metrics path. |
+| Metrics scrape but do not appear | Check exporter endpoint/token settings and Metric Finder. | Verify Splunk environment variables and exporter configuration. |
+| Too many series appear | Review `metric_relabel_configs` and labels. | Narrow metric names and drop high-cardinality labels at the source or receiver. |
 
 ## Scaling Recommendations
 
-Keep scrape intervals realistic for the endpoint cost and metric volume. Split unrelated high-volume target groups into separate receiver instances so changes can be rolled out independently.
-
-For many targets, run Collectors close to the targets and forward through a Splunk OTel Collector gateway only when you need central egress control. Avoid running multiple identical Prometheus scraper replicas against the same targets unless duplicate scrapes are acceptable or you have a sharding plan.
-
-Review cardinality before adding labels to the allow-list. Dropping unneeded series at scrape time is cheaper than filtering after export.
+* Group targets by scrape interval and ownership.
+* Avoid very short scrape intervals until Collector CPU and target load are measured.
+* Watch metric cardinality when adding target labels or scraping many pods/instances.
 
 ## Security and Operations Notes
 
-Use files or Kubernetes secrets for scrape credentials. Do not put bearer tokens or passwords directly in the committed YAML.
-
-Treat scraped labels as customer data until reviewed. Prometheus labels can include hostnames, user identifiers, tenant IDs, and request parameters depending on the exporter.
-
-Keep Collector logs at `info` by default. Use debug logging only for short troubleshooting windows because scrape and OTTL diagnostics can be verbose.
+* Keep bearer tokens and CA files mounted as secrets, not committed to the repo.
+* Do not set `insecure_skip_verify: true` for production targets without an explicit exception.
+* Avoid scraping endpoints that expose sensitive labels or values.
 
 ## Configuration Source Basis
 
-This recipe adapts the upstream Prometheus receiver `scrape_configs` model for two common production cases: application `/metrics` endpoints and authenticated HTTPS appliance exporters. The static target, `authorization`, `tls_config`, and `metric_relabel_configs` structure follows Prometheus scrape configuration conventions and the OpenTelemetry Collector Prometheus receiver documentation.
-
-The Splunk exporter and processor chain follows existing backend examples that export metrics through `signalfx` with `memory_limiter`, resource enrichment, and `batch`, including the local VAST Data and GPU metric examples. The allow-list is intentionally illustrative; replace it with metric names from the exporter you actually operate.
+This cookbook adapts the local `otelcol.yaml` example, Splunk metrics exporter patterns, and the OpenTelemetry Prometheus receiver into an existing Collector configuration workflow.
 
 ## Official Documentation
 
-* [Splunk Prometheus receiver](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/receivers/prometheus-receiver)
-* [OpenTelemetry Collector Prometheus receiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver)
-* [Prometheus scrape configuration](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#scrape_config)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/prometheusreceiver

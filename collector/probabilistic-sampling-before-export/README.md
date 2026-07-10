@@ -2,185 +2,189 @@
 
 ## Scenario
 
-Use this recipe when you need stateless volume control for traces or logs before export to Splunk Observability Cloud.
+You already have a Collector receiving traces and logs and exporting them to Splunk Observability Cloud. In this scenario, you will add stateless probabilistic sampling to reduce export volume before telemetry leaves the Collector.
 
-Probabilistic sampling is appropriate for baseline reduction when every item can be sampled independently. Do not use this recipe when you need to retain all spans for error traces or slow traces; use tail sampling for whole-trace decisions.
+Use this when each trace or log record can be sampled independently and you need a simple baseline reduction policy. Do not use this when you must keep complete error traces or slow traces; use tail sampling for whole-trace decisions.
+
+What you should capture before changing the Collector:
+
+| Signal | Example before this config | What you see |
+| --- | --- | --- |
+| Traces | 100 ordinary successful request traces in a short test window | Nearly all 100 traces are exported. |
+| Logs | 100 similar informational log records | Nearly all 100 logs are exported. |
+| Errors | 5 error traces mixed with normal traces | Error traces are not specially protected by this policy. |
 
 ## Architecture Overview
 
 ```text
-applications and agents
-  -> OTLP traces and logs
+applications or agents
+  -> existing Collector OTLP receiver
   -> probabilistic_sampler processors
-  -> resourcedetection and Splunk context attributes
-  -> batch
-  -> Splunk APM and log ingest
+  -> resource detection and Splunk context
+  -> existing Splunk trace and log exporters
 ```
 
-Trace sampling decisions are based on trace ID. Log sampling can use trace ID when present, and the processor also supports log-specific priority behavior documented upstream.
+This cookbook assumes the Collector is already installed. The work is to merge the relevant receiver, processor, exporter, and pipeline blocks into the configuration you already operate.
 
 ## Prerequisites
 
-* Splunk Observability Cloud access token, HEC token, ingest URL, and HEC URL.
-* A Collector build that includes the `probabilistic_sampler` processor.
-* A documented sampling policy approved by service owners.
-* Consistent `hash_seed` values across Collectors at the same tier when you need consistent sampling behavior.
-* For logs, an understanding of whether records have trace IDs. Records without usable randomness can pass through when `fail_closed: false`.
+* An existing Collector deployment that already receives OTLP traces and logs.
+* Access to edit the Collector configuration and restart or roll out the Collector safely.
+* An approved sampling percentage for each signal.
+* A consistent `hash_seed` plan for Collectors at the same tier if deterministic sampling matters.
+* A test workload that can send enough synthetic traces or logs to observe the approximate sample rate.
+
+If your current Collector already defines these values, keep using your existing secret mechanism. Otherwise map these placeholders to your platform's environment variables or secret references:
+
+```bash
+export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
+export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
+export SPLUNK_API_URL='https://api.<realm>.observability.splunkcloud.com'
+export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
+export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
+export DEPLOYMENT_ENVIRONMENT='<environment_name>'
+```
 
 ## Installation Instructions
 
-1. Copy [otelcol.yaml](./otelcol.yaml) to the Collector host or gateway.
-2. Replace `sampling_percentage` with the approved trace and log sampling rates.
-3. Use the same `hash_seed` for Collectors at the same tier.
-4. Export Splunk settings:
+1. Download or copy `otelcol.yaml` and compare it with your current Collector config.
+2. Copy the two `probabilistic_sampler` processors into your existing `processors` block.
+3. Set `sampling_percentage` to your approved value; the example uses `20` as a demonstrable starting point, not a universal recommendation.
+4. Place the sampler after `memory_limiter` and before enrichment/export processors in the affected pipelines.
+5. Restart or roll out the Collector and send a known test volume.
 
-   ```bash
-   export SPLUNK_ACCESS_TOKEN='<splunk_access_token>'
-   export SPLUNK_HEC_TOKEN='<splunk_hec_token>'
-   export SPLUNK_INGEST_URL='https://ingest.<realm>.observability.splunkcloud.com'
-   export SPLUNK_HEC_URL='https://ingest.<realm>.observability.splunkcloud.com/v1/log'
-   export DEPLOYMENT_ENVIRONMENT='<environment_name>'
-   ```
-
-5. Start the Collector:
-
-   ```bash
-   docker run --rm --name splunk-otel-collector \
-     -p 4317:4317 \
-     -p 4318:4318 \
-     -e SPLUNK_CONFIG=/etc/collector/otelcol.yaml \
-     -e SPLUNK_ACCESS_TOKEN \
-     -e SPLUNK_HEC_TOKEN \
-     -e SPLUNK_INGEST_URL \
-     -e SPLUNK_HEC_URL \
-     -e DEPLOYMENT_ENVIRONMENT \
-     -v "$(pwd)/otelcol.yaml:/etc/collector/otelcol.yaml:ro" \
-     quay.io/signalfx/splunk-otel-collector:latest
-   ```
+For host-based Collectors, validate the merged file with your existing Collector binary or service wrapper before restart. For Kubernetes Helm deployments, run a Helm template or diff workflow before applying changes.
 
 ## Proposed Configuration File
 
-Use [otelcol.yaml](./otelcol.yaml). The sampling blocks are:
+Download the reusable example file: [otelcol.yaml](./otelcol.yaml).
+
+Use it as a reference or overlay, not as a blind replacement for your production Collector config. Keep your existing receivers, extensions, exporters, resource attributes, and secret references unless this scenario intentionally changes them.
+
+Full example Collector configuration:
 
 ```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
 processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 512
   probabilistic_sampler/traces:
     mode: proportional
     sampling_percentage: 20
     hash_seed: 22
+    fail_closed: true
   probabilistic_sampler/logs:
     sampling_percentage: 20
     hash_seed: 22
     fail_closed: false
     sampling_priority: sampling.priority
-```
+  resourcedetection:
+    detectors: [env, system]
+    override: false
+  resource/splunk_context:
+    attributes:
+      - action: upsert
+        key: deployment.environment
+        value: "${env:DEPLOYMENT_ENVIRONMENT}"
+      - action: upsert
+        key: service.namespace
+        value: probabilistic-sampling
+  batch: {}
 
-For logs without trace IDs, consider adding a stable log record attribute and configuring `attribute_source: record` plus `from_attribute`. Do not use a high-cardinality customer identifier without review.
+exporters:
+  otlphttp:
+    traces_endpoint: "${env:SPLUNK_INGEST_URL}/v2/trace/otlp"
+    headers:
+      X-SF-Token: "${env:SPLUNK_ACCESS_TOKEN}"
+  splunk_hec:
+    token: "${env:SPLUNK_HEC_TOKEN}"
+    endpoint: "${env:SPLUNK_HEC_URL}"
+    source: otel
+    sourcetype: otel
+    profiling_data_enabled: false
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, probabilistic_sampler/traces, resourcedetection, resource/splunk_context, batch]
+      exporters: [otlphttp]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, probabilistic_sampler/logs, resourcedetection, resource/splunk_context, batch]
+      exporters: [splunk_hec]
+```
 
 ## Validation
 
 ### Before Applying
 
-* Capture a source-side baseline for traces and logs before enabling the sampler. Use a large enough non-production sample that a percentage-based comparison is meaningful.
-* In Splunk APM and logs search, record the current trace and log volume for the same test window. If another sampler is already active, document it before attributing changes to this Collector.
-* Send synthetic logs with the `sampling.priority` values your policy depends on and confirm how the current pipeline handles them before this processor is introduced.
-* Review current Collector logs for OTLP receiver or exporter errors so missing data is not confused with sampling.
+1. Send or observe the synthetic examples from the Scenario section through your current Collector path.
+2. Confirm the baseline behavior in Collector logs and Splunk Observability Cloud.
+3. Save a screenshot, query result, or metric/log/span example so you can compare after the change.
 
-Expected baseline result:
+Baseline examples to look for:
 
-```text
-Source-side test: for example, 1,000 synthetic traces and 1,000 synthetic logs are emitted.
-Splunk APM/logs: retained volume is near the existing baseline, often close to the source-side count if no sampler is already active.
-Collector logs: no probabilistic_sampler/traces or probabilistic_sampler/logs processor is active in these pipelines.
-```
+| Signal | Example before this config | What you see |
+| --- | --- | --- |
+| Traces | 100 ordinary successful request traces in a short test window | Nearly all 100 traces are exported. |
+| Logs | 100 similar informational log records | Nearly all 100 logs are exported. |
+| Errors | 5 error traces mixed with normal traces | Error traces are not specially protected by this policy. |
 
 ### After Applying
 
-* Start the Collector with [otelcol.yaml](./otelcol.yaml) and check logs for configuration errors involving `probabilistic_sampler/traces` or `probabilistic_sampler/logs`, plus `otlphttp` or `splunk_hec` exporter errors.
-* Re-run the same trace and log test with a sufficiently large sample. Compare source-side counts with Splunk-side counts and confirm the retained volume is broadly consistent with the configured `sampling_percentage`; do not use a tiny sample to validate a probabilistic result.
-* In Splunk APM, inspect retained traces and confirm expected resource context, including `deployment.environment` and `service.namespace=probabilistic-sampling`, is still present.
-* In logs search, verify synthetic records with `sampling.priority` values behave according to the policy you validated for your deployed Collector version, and that retained logs still contain expected resource context.
-* Confirm dashboards or alert thresholds that depend on sampled data are interpreted using the effective sampling policy.
+1. Confirm the Collector starts without configuration, receiver, processor, or exporter errors.
+2. Send the same synthetic examples again.
+3. Compare the post-change output to the expected result below.
 
-Expected post-change result:
+| Signal | Expected after applying this config | How to interpret it |
+| --- | --- | --- |
+| Traces | About 20 of 100 ordinary traces are exported with `sampling_percentage: 20`. | Small test windows can vary; larger windows should be closer to the configured percentage. |
+| Logs | About 20 of 100 eligible log records are exported. | Logs without usable randomness can behave according to `fail_closed` and processor settings. |
+| Errors | Error traces are sampled like any other trace. | This is expected for probabilistic sampling; use tail sampling if errors must always be retained. |
 
-```text
-Collector logs: probabilistic_sampler/traces and probabilistic_sampler/logs start without configuration errors.
-Splunk APM/logs: over a large non-production sample, retained telemetry is roughly consistent with sampling_percentage=20.
-Splunk APM/logs: retained telemetry still includes deployment.environment and service.namespace=probabilistic-sampling.
-```
-
-Do not validate this with a tiny sample. With percentage-based sampling, small batches can vary substantially from the configured percentage.
-
-### Live Local Validation Result
-
-Validated with `scripts/validate_collector_cookbooks.py` using `quay.io/signalfx/splunk-otel-collector:latest`, 100 synthetic OTLP log records, and the Collector `debug` exporter. This validates local probabilistic sampler behavior before any Splunk export.
-
-Status: `PASS`
-
-Observed before:
-
-```text
-Synthetic source sent 100 log records.
-```
-
-Observed after:
-
-```text
-debug exporter output retained 36 unique records, consistent with percentage sampling over a small local test.
-```
-
-### Splunk Backend Payload Validation Status
-
-Checked with `scripts/validate_collector_cookbooks.py --backend-cookbooks --realm us0`. The local Collector payload validation passed, but backend payload validation for this signal was not performed in this environment.
-
-```text
-Not performed.
-This cookbook processes logs. No SPLUNK_HEC_TOKEN or Splunk log-query endpoint is configured in .env, so I cannot honestly query the ingested log body or log attributes in Splunk.
-The local Collector validation above still inspects the actual processed debug-exporter payload, including log/span bodies and attributes.
-Backend validation is required; local health alone does not prove ingestion.
-```
+If an example depends on OTTL syntax, you can sanity-check non-sensitive sample expressions with `https://ottl.run/`. That does not replace testing the exact Collector build and configuration you deploy.
 
 ## Why This Configuration
 
-The trace sampler uses `mode: proportional` for predictable ratio-based trace reduction. The log sampler keeps `fail_closed: false` so logs without sampling randomness are not dropped unexpectedly during initial rollout.
-
-Separate named processors make trace and log behavior explicit. Metrics are not included because this processor is documented for spans and log records, not metric sampling.
+Probabilistic sampling is simple, fast, and stateless. It is useful for baseline volume reduction at high-throughput tiers, but it cannot make decisions based on complete trace outcome or latency.
 
 ## Troubleshooting
 
-If sampled trace counts are unexpectedly high or low, confirm all Collectors at the same tier use the same `hash_seed` and sampling percentage.
-
-If logs are not reduced, check whether records have trace IDs. Without usable randomness and with `fail_closed: false`, erroneous records pass through.
-
-If important logs are dropped, use `sampling.priority` or a separate routing policy for critical sources before broad sampling.
-
-If traces look incomplete, confirm SDK sampling and Collector sampling are not fighting each other. Stateless processor sampling does not make whole-trace keep decisions like tail sampling.
+| Symptom | First check | Likely fix |
+| --- | --- | --- |
+| Sample rate looks wrong | Use a larger test window and confirm the correct pipeline includes the sampler. | Validate `sampling_percentage` and `hash_seed` values. |
+| Important traces are missing | Check whether this should be tail sampling instead. | Use policy-based tail sampling for errors, latency, or service-specific retention. |
+| Logs are unexpectedly retained | Check whether records have trace IDs and whether `fail_closed` is false. | Set log-specific sampling behavior intentionally for your data shape. |
 
 ## Scaling Recommendations
 
-Apply probabilistic sampling as close to the source as operationally safe. This reduces network and gateway load.
-
-Use the same sampling settings per tier. Mixed percentages can be valid, but document why each tier differs.
-
-Keep sampling percentages high enough for low-traffic services. A 1 percent sample on a service with few requests can remove almost all diagnostic value.
+* Keep sampling decisions consistent at the same Collector tier by using stable seed values.
+* Roll out gradually and compare request/error rates before and after sampling.
+* Do not stack multiple independent probabilistic samplers unless the combined effective rate is intentional.
 
 ## Security and Operations Notes
 
-Sampling drops data. Make sure retention requirements, audit expectations, and incident response needs are reviewed before production rollout.
-
-Do not use sampling as redaction. Sensitive fields in retained telemetry still require redaction or transform rules.
-
-Record the effective sampling policy in service runbooks so dashboards and alert thresholds are interpreted correctly.
+* Sampling is not redaction; sensitive data in retained telemetry is still exported.
+* Document who approved each sampling percentage.
+* Keep Splunk tokens in environment variables or your platform secret manager.
 
 ## Configuration Source Basis
 
-This recipe is derived from the upstream probabilistic sampler processor behavior for stateless percentage-based reduction of spans and logs. The real-world scenario is cost and volume control for high-throughput services where retaining every ordinary request or log line is not operationally necessary.
-
-The recipe deliberately excludes metrics because the referenced processor is documented for traces and logs. Use metric aggregation, scrape-time relabeling, or receiver-specific controls for metric volume instead.
+This cookbook adapts the local `otelcol.yaml` example and the OpenTelemetry Collector probabilistic sampler processor behavior into an existing-Collector rollout flow.
 
 ## Official Documentation
 
-* [Splunk probabilistic sampler processor](https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector/get-started-with-the-splunk-distribution-of-the-opentelemetry-collector/collector-components/processors/probabilistic-sampler-processor)
-* [OpenTelemetry Collector probabilistic sampler processor](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/probabilisticsamplerprocessor)
-* [OpenTelemetry sampling concepts](https://opentelemetry.io/docs/concepts/sampling/)
+* https://help.splunk.com/en/splunk-observability-cloud/manage-data/splunk-distribution-of-the-opentelemetry-collector
+* https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/probabilisticsamplerprocessor
